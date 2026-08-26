@@ -11,6 +11,7 @@ namespace umbriel {
   struct ConfigChange {
     bool colors = false;
     bool appearance = false;
+    bool animation = false;
     bool overview = false;
     bool hotCorners = false;
     bool layout = false;
@@ -27,6 +28,7 @@ namespace umbriel {
     [[nodiscard]] bool any() const {
       return colors
           || appearance
+          || animation
           || overview
           || hotCorners
           || layout
@@ -53,22 +55,28 @@ namespace umbriel {
   // not source sections: one source change can invalidate several consumers.
   struct ConfigEffects {
     bool outputState = false;
+    // Per-frame async presentation policy. This is separate from outputState
+    // so a policy reload does not reapply modes, HDR, VRR, focus, or scale.
+    bool tearingPolicy = false;
     bool workspaceInventory = false;
     bool workspaceLayout = false;
     bool sceneBlur = false;
     bool viewChrome = false;
     bool layerEffects = false;
+    bool animation = false;
     bool input = false;
     bool overviewPresentation = false;
     bool internalUi = false;
 
     [[nodiscard]] bool any() const {
       return outputState
+          || tearingPolicy
           || workspaceInventory
           || workspaceLayout
           || sceneBlur
           || viewChrome
           || layerEffects
+          || animation
           || input
           || overviewPresentation
           || internalUi;

@@ -82,6 +82,10 @@ namespace umbriel {
     m_server.registry().promote(view);
     view->setUrgent(false);
 
+    if (reason == FocusReason::XdgActivation || reason == FocusReason::ForeignActivation) {
+      view->applyDeferredUnfullscreen();
+    }
+
     // Keep workspace focus while exclusive layer-shell holds the seat; refocus applies it later. Still clear activation
     // chrome so the previous window does not stay visually focused. Overview owns the seat the same way, but keeps the
     // chrome so card borders track the focused window; the keyboard enter replays when it closes.
@@ -273,14 +277,11 @@ namespace umbriel {
       return nullptr;
     }
     auto* view = static_cast<View*>(sceneNode);
-    // Workspace slides keep the outgoing scene enabled until the animation finishes. It is a visual snapshot, not an
-    // interactive workspace: accepting a click here would make focusView reactivate the workspace that the user just
-    // left, which is especially easy to trigger when switching with the wheel under a large window or text field.
-    if (!view->pinned()) {
-      if (Workspace* workspace = view->workspace(); workspace != nullptr && !workspace->active()) {
-        *surface = nullptr;
-        return nullptr;
-      }
+    // Workspace transitions and scratchpad fade-outs keep an inactive view's scene enabled until the animation
+    // finishes. They are visual snapshots, not interactive windows.
+    if (!view->pinned() && !view->onActiveWorkspace()) {
+      *surface = nullptr;
+      return nullptr;
     }
     return view;
   }

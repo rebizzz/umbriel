@@ -3,12 +3,14 @@
 #include "config/config_diag.h"
 #include "config/keybind_parse.h"
 #include "config/value_parse.h"
+#include "core/animation.h"
 #include "layout/layout.h"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <regex>
 #include <string>
@@ -129,6 +131,10 @@ namespace umbriel {
   ) {
     return windowMode ? vrrEnabled(*windowMode, windowFullscreen) : vrrEnabled(outputMode, outputFullscreen);
   }
+  [[nodiscard]] constexpr bool
+  tearingEnabled(bool outputAllowed, std::optional<bool> windowOverride, bool clientHintAsync) {
+    return outputAllowed && windowOverride.value_or(clientHintAsync);
+  }
   struct OutputRule {
     std::string name;
     // False powers the monitor off, removes it from the layout, and hides its
@@ -139,6 +145,9 @@ namespace umbriel {
     std::optional<double> scale;
     std::optional<int> transform;
     VrrMode vrr = VrrMode::Disabled;
+    // Global safety gate. Even a client async hint or a window-rule override
+    // cannot request tearing unless the owning output enables it.
+    bool allowTearing = false;
     HdrMode hdr = HdrMode::Off;
     float sdrWhite = 203.0F;
     // Explicit workspace inventory. Omitted means dynamic workspaces.
@@ -184,6 +193,9 @@ namespace umbriel {
     std::optional<bool> defaultPinned;
     std::optional<bool> focusOnActivate;
     std::optional<VrrMode> vrr;
+    // Overrides the client's tearing-control hint. Omitted follows the hint,
+    // true forces async preference, and false vetoes it.
+    std::optional<bool> allowTearing;
     std::optional<HdrMode> hdr;
     std::optional<double> opacity; // 0.0-1.0
     std::optional<bool> blur;
@@ -210,6 +222,7 @@ namespace umbriel {
           && defaultPinned == other.defaultPinned
           && focusOnActivate == other.focusOnActivate
           && vrr == other.vrr
+          && allowTearing == other.allowTearing
           && hdr == other.hdr
           && opacity == other.opacity
           && blur == other.blur
@@ -234,6 +247,7 @@ namespace umbriel {
     std::optional<bool> defaultPinned;
     std::optional<bool> focusOnActivate;
     std::optional<VrrMode> vrr;
+    std::optional<bool> allowTearing;
     std::optional<HdrMode> hdr;
     std::optional<double> opacity;
     std::optional<bool> blur;
@@ -292,7 +306,6 @@ namespace umbriel {
       std::array<float, 4> outerBorderColor{0.10F, 0.10F, 0.12F, 1.0F};
       std::array<float, 4> insertHintColor{0.50F, 0.78F, 1.0F, 0.50F};
       std::array<float, 4> backdropColor{0.0F, 0.0F, 0.0F, 1.0F};
-      int animationMs = 200;
       double dragOpacity = 0.75;
       struct Blur {
         bool enabled = true;
@@ -318,6 +331,81 @@ namespace umbriel {
       [[nodiscard]] int totalBorderWidth() const { return borderWidth + outerBorderWidth; }
       bool operator==(const Appearance&) const = default;
     } appearance;
+
+    struct Animation {
+      bool enabled = true;
+      int durationMs = 200;
+      AnimationCurve curve{.easing = Easing::Snappy};
+      std::map<std::string, BezierCurve> beziers;
+      std::map<std::string, SpringConfig> springs;
+
+      struct WindowsIn {
+        bool enabled = true;
+        int durationMs = 200;
+        AnimationCurve curve{.easing = Easing::Snappy};
+        std::string style = "popin";
+        double scale = 0.85;
+        bool operator==(const WindowsIn&) const = default;
+      } windowsIn;
+
+      struct WindowsOut {
+        bool enabled = true;
+        int durationMs = 200;
+        AnimationCurve curve{.easing = Easing::Snappy};
+        std::string style = "fade";
+        bool operator==(const WindowsOut&) const = default;
+      } windowsOut;
+
+      struct WindowsMove {
+        bool enabled = true;
+        int durationMs = 200;
+        AnimationCurve curve{.easing = Easing::Snappy};
+        bool operator==(const WindowsMove&) const = default;
+      } windowsMove;
+
+      struct Workspaces {
+        bool enabled = true;
+        int durationMs = 250;
+        AnimationCurve curve{.easing = Easing::Snappy};
+        bool operator==(const Workspaces&) const = default;
+      } workspaces;
+
+      struct Scratchpad {
+        bool enabled = true;
+        int durationMs = 250;
+        AnimationCurve curve{.easing = Easing::Snappy};
+        double dim = 0.2;
+        bool blur = false;
+        double scale = 0.0;
+        bool maximize = false;
+        bool fullscreen = false;
+        bool operator==(const Scratchpad&) const = default;
+      } scratchpad;
+
+      struct Border {
+        bool enabled = true;
+        int durationMs = 200;
+        AnimationCurve curve{.easing = Easing::Snappy};
+        bool operator==(const Border&) const = default;
+      } border;
+
+      struct DimUnfocused {
+        bool enabled = true;
+        int durationMs = 200;
+        AnimationCurve curve{.easing = Easing::Snappy};
+        double dim = 0.0;
+        bool operator==(const DimUnfocused&) const = default;
+      } dimUnfocused;
+
+      struct Fade {
+        bool enabled = true;
+        int durationMs = 200;
+        AnimationCurve curve{.easing = Easing::Snappy};
+        bool operator==(const Fade&) const = default;
+      } fade;
+
+      bool operator==(const Animation&) const = default;
+    } animation;
 
     struct Overview {
       // Workspace scale when fully zoomed out.

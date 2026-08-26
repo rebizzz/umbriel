@@ -229,6 +229,30 @@ UMBRIEL_TEST(modKeyIsUserConfigurable) {
   CHECK(containsDiagnostic(store, "unknown general.mod_key"));
 }
 
+UMBRIEL_TEST(keybindTableLoadsAllowWhenLocked) {
+  const TempConfig file;
+  ConfigStore& store = umbriel::configStore();
+  store.setRootPath(file.path(), true);
+
+  file.write(
+      "[keybinds]\n"
+      "\"XF86AudioRaiseVolume\" = { action = \"spawn:volume-up\", allow_when_locked = true }\n"
+      "\"XF86AudioLowerVolume\" = \"spawn:volume-down\"\n"
+  );
+  CHECK(store.reload().success);
+  CHECK_EQ(store.config().keybinds.size(), size_t{2});
+
+  bool allowedWhenLocked = false;
+  bool defaultsToBlocked = false;
+  for (const auto& bind : store.config().keybinds) {
+    allowedWhenLocked = allowedWhenLocked || bind.allowWhenLocked;
+    defaultsToBlocked = defaultsToBlocked || !bind.allowWhenLocked;
+  }
+  CHECK(allowedWhenLocked);
+  CHECK(defaultsToBlocked);
+  CHECK(!containsDiagnostic(store, "allow_when_locked"));
+}
+
 UMBRIEL_TEST(hotCornersLoadActionsAndValidate) {
   const TempConfig file;
   ConfigStore& store = umbriel::configStore();
@@ -336,6 +360,30 @@ UMBRIEL_TEST(outputVrrPolicyLoadsAndDefaultsDisabled) {
   CHECK(store.config().outputs[0].vrr == VrrMode::Disabled);
 }
 
+UMBRIEL_TEST(outputTearingPermissionLoadsAndDefaultsDisabled) {
+  const TempConfig file;
+  ConfigStore& store = umbriel::configStore();
+  store.setRootPath(file.path(), true);
+
+  file.write("[output.DP-1]\ntearing = true\n");
+  CHECK(store.reload().success);
+  CHECK_EQ(store.config().outputs.size(), size_t{1});
+  CHECK(store.config().outputs[0].allowTearing);
+
+  file.write("[output.DP-1]\ntearing = false\n");
+  CHECK(store.reload().success);
+  CHECK(!store.config().outputs[0].allowTearing);
+
+  file.write("[output.DP-1]\n");
+  CHECK(store.reload().success);
+  CHECK(!store.config().outputs[0].allowTearing);
+
+  file.write("[output.DP-1]\ntearing = \"yes\"\n");
+  CHECK(store.reload().success);
+  CHECK(!store.config().outputs[0].allowTearing);
+  CHECK(containsDiagnostic(store, "ignoring output.DP-1.tearing (expected boolean)"));
+}
+
 UMBRIEL_TEST(outputHdrPolicyAndSdrWhiteLoad) {
   const TempConfig file;
   ConfigStore& store = umbriel::configStore();
@@ -394,6 +442,30 @@ UMBRIEL_TEST(windowOutputPoliciesLoadAndRejectInvalidValues) {
   CHECK_EQ(store.config().windowRules.size(), size_t{1});
   CHECK(!store.config().windowRules[0].hdr);
   CHECK(containsDiagnostic(store, "ignoring window_rule.hdr"));
+}
+
+UMBRIEL_TEST(windowTearingOverrideLoadsAsAnOptionalBoolean) {
+  const TempConfig file;
+  ConfigStore& store = umbriel::configStore();
+  store.setRootPath(file.path(), true);
+
+  file.write("[[window_rule]]\nmatch.app_id = \"^game$\"\ntearing = true\n");
+  CHECK(store.reload().success);
+  CHECK_EQ(store.config().windowRules.size(), size_t{1});
+  CHECK(store.config().windowRules[0].allowTearing && *store.config().windowRules[0].allowTearing);
+
+  file.write("[[window_rule]]\ntearing = false\n");
+  CHECK(store.reload().success);
+  CHECK(store.config().windowRules[0].allowTearing && !*store.config().windowRules[0].allowTearing);
+
+  file.write("[[window_rule]]\n");
+  CHECK(store.reload().success);
+  CHECK(!store.config().windowRules[0].allowTearing);
+
+  file.write("[[window_rule]]\ntearing = \"yes\"\n");
+  CHECK(store.reload().success);
+  CHECK(!store.config().windowRules[0].allowTearing);
+  CHECK(containsDiagnostic(store, "ignoring window_rule.tearing (expected boolean)"));
 }
 
 UMBRIEL_TEST(outputEnabledFlagParsesAndDefaultsTrue) {
@@ -809,6 +881,88 @@ UMBRIEL_TEST(tabletConfigDefaults) {
   CHECK(!tablet.mapToFocusedWindow);
   CHECK(!tablet.leftHanded);
   CHECK(!tablet.calibrationMatrix.has_value());
+}
+
+UMBRIEL_TEST(animationUsesCanonicalTopLevelNamespace) {
+  const TempConfig file;
+  file.write(R"(
+[animation]
+enabled = false
+duration_ms = 320
+curve = "linear"
+
+[animation.beziers]
+custom = [0.1, 0.2, 0.3, 1.0]
+
+[animation.springs]
+bouncy = { damping = 0.5, stiffness = 200 }
+
+[animation.windows_in]
+enabled = false
+duration_ms = 450
+curve = "custom"
+style = "zoom"
+scale = 0.7
+
+[animation.windows_out]
+curve = "bouncy"
+style = "slide"
+
+[animation.scratchpad]
+dim = 0.4
+blur = true
+)");
+
+  ConfigStore& store = umbriel::configStore();
+  store.setRootPath(file.path(), true);
+  const umbriel::ConfigReloadResult result = store.reload();
+  const auto& animation = store.config().animation;
+
+  CHECK(result.success);
+  CHECK(!animation.enabled);
+  CHECK_EQ(animation.durationMs, 320);
+  CHECK(animation.curve.easing == umbriel::Easing::Linear);
+  CHECK(!animation.windowsIn.enabled);
+  CHECK_EQ(animation.windowsIn.durationMs, 450);
+  CHECK(animation.windowsIn.curve.easing == umbriel::Easing::CustomBezier);
+  CHECK_EQ(animation.windowsIn.style, std::string{"zoom"});
+  CHECK_EQ(animation.windowsIn.scale, 0.7);
+  CHECK(animation.windowsOut.curve.easing == umbriel::Easing::Spring);
+  CHECK_EQ(animation.windowsOut.style, std::string{"slide"});
+  CHECK_EQ(animation.windowsMove.durationMs, 320);
+  CHECK_EQ(animation.scratchpad.dim, 0.4);
+  CHECK(animation.scratchpad.blur);
+
+  file.write(R"(
+[appearance.animations]
+enabled = false
+
+[animations]
+enabled = false
+)");
+  CHECK(store.reload().success);
+  CHECK(store.config().animation.enabled);
+  CHECK(containsDiagnostic(store, "unknown key appearance.animations"));
+  CHECK(containsDiagnostic(store, "unknown key animations"));
+}
+
+UMBRIEL_TEST(packagedAnimationDefaultsMatchCompiledDefaults) {
+  std::filesystem::path root = std::filesystem::current_path();
+  while (!std::filesystem::exists(root / "examples/config.toml")) {
+    const std::filesystem::path parent = root.parent_path();
+    if (parent == root) {
+      CHECK(false);
+      return;
+    }
+    root = parent;
+  }
+
+  ConfigStore& store = umbriel::configStore();
+  store.setRootPath(root / "examples/config.toml", true);
+  const umbriel::ConfigReloadResult result = store.reload();
+
+  CHECK(result.success);
+  CHECK(store.config().animation == umbriel::Config{}.animation);
 }
 
 int main() { return RUN_TESTS(); }

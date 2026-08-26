@@ -40,6 +40,40 @@ namespace umbriel {
           && lhs.sdrWhite == rhs.sdrWhite;
     }
 
+    bool sameOutputTearingPolicy(const OutputRule* before, const OutputRule* after) {
+      static const OutputRule defaults;
+      const OutputRule& lhs = before != nullptr ? *before : defaults;
+      const OutputRule& rhs = after != nullptr ? *after : defaults;
+      return lhs.allowTearing == rhs.allowTearing;
+    }
+
+    bool sameWindowTearingPolicy(const Config& before, const Config& after) {
+      size_t beforeIndex = 0;
+      size_t afterIndex = 0;
+      while (true) {
+        while (beforeIndex < before.windowRules.size() && !before.windowRules[beforeIndex].allowTearing.has_value()) {
+          ++beforeIndex;
+        }
+        while (afterIndex < after.windowRules.size() && !after.windowRules[afterIndex].allowTearing.has_value()) {
+          ++afterIndex;
+        }
+        const bool beforeEnd = beforeIndex == before.windowRules.size();
+        const bool afterEnd = afterIndex == after.windowRules.size();
+        if (beforeEnd || afterEnd) {
+          return beforeEnd && afterEnd;
+        }
+
+        const WindowRule& lhs = before.windowRules[beforeIndex++];
+        const WindowRule& rhs = after.windowRules[afterIndex++];
+        if (lhs.appIdPattern != rhs.appIdPattern
+            || lhs.titlePattern != rhs.titlePattern
+            || lhs.matchFocused != rhs.matchFocused
+            || lhs.allowTearing != rhs.allowTearing) {
+          return false;
+        }
+      }
+    }
+
     bool sameWorkspaceInventory(const OutputRule* before, const OutputRule* after) {
       static const OutputRule defaults;
       const OutputRule& lhs = before != nullptr ? *before : defaults;
@@ -51,18 +85,24 @@ namespace umbriel {
 
   ConfigEffects ConfigEffects::between(const Config& before, const Config& after) {
     const bool outputState = outputProjectionChanged(before, after, sameOutputState);
+    const bool tearingPolicy =
+        outputProjectionChanged(before, after, sameOutputTearingPolicy) || !sameWindowTearingPolicy(before, after);
     const bool workspaceInventory = outputProjectionChanged(before, after, sameWorkspaceInventory);
     const bool sceneBlur = before.appearance.blur != after.appearance.blur;
+    const bool focusDim = before.animation.enabled != after.animation.enabled
+        || before.animation.dimUnfocused != after.animation.dimUnfocused;
     return {
         .outputState = outputState,
+        .tearingPolicy = tearingPolicy,
         .workspaceInventory = workspaceInventory,
         .workspaceLayout = workspaceInventory
             || before.layout != after.layout
             || before.workspaceRules != after.workspaceRules
             || before.appearance.totalBorderWidth() != after.appearance.totalBorderWidth(),
         .sceneBlur = sceneBlur,
-        .viewChrome = before.appearance != after.appearance || before.windowRules != after.windowRules,
+        .viewChrome = before.appearance != after.appearance || before.windowRules != after.windowRules || focusDim,
         .layerEffects = sceneBlur || before.layerRules != after.layerRules,
+        .animation = before.animation != after.animation,
         .input = before.input != after.input || before.hotCorners != after.hotCorners,
         .overviewPresentation = before.overview != after.overview,
         .internalUi = before.colors != after.colors || before.general.modKey != after.general.modKey,
@@ -72,11 +112,13 @@ namespace umbriel {
   ConfigEffects ConfigEffects::everything() {
     return {
         .outputState = true,
+        .tearingPolicy = true,
         .workspaceInventory = true,
         .workspaceLayout = true,
         .sceneBlur = true,
         .viewChrome = true,
         .layerEffects = true,
+        .animation = true,
         .input = true,
         .overviewPresentation = true,
         .internalUi = true,
@@ -87,6 +129,7 @@ namespace umbriel {
     return {
         .colors = true,
         .appearance = true,
+        .animation = true,
         .overview = true,
         .hotCorners = true,
         .layout = true,
@@ -106,6 +149,7 @@ namespace umbriel {
     return {
         .colors = before.colors != after.colors,
         .appearance = before.appearance != after.appearance,
+        .animation = before.animation != after.animation,
         .overview = before.overview != after.overview,
         .hotCorners = before.hotCorners != after.hotCorners,
         .layout = before.layout != after.layout,
@@ -134,6 +178,7 @@ namespace umbriel {
     };
     add(colors, "colors");
     add(appearance, "appearance");
+    add(animation, "animation");
     add(overview, "overview");
     add(hotCorners, "hot corners");
     add(layout, "layout");
@@ -161,11 +206,13 @@ namespace umbriel {
       out += name;
     };
     add(outputState, "output state");
+    add(tearingPolicy, "tearing policy");
     add(workspaceInventory, "workspace inventory");
     add(workspaceLayout, "workspace layout");
     add(sceneBlur, "scene blur");
     add(viewChrome, "view chrome");
     add(internalUi, "internal UI");
+    add(animation, "animation state");
     add(layerEffects, "layer effects");
     add(input, "input");
     add(overviewPresentation, "overview presentation");

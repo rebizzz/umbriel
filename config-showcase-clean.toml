@@ -1,0 +1,203 @@
+[general]
+mod_key = "Alt"
+show_cheatsheet = false
+
+[appearance]
+border_width = 2
+corner_radius = 14
+border_focused = "#7AA3FFFF"
+border_unfocused = "#292933FF"
+scratchpad_border_focused = "#F5C96BFF"
+scratchpad_border_unfocused = "#5C4A2AFF"
+
+[appearance.shadow]
+enabled = true
+softness = 24
+offset_x = 0
+offset_y = 8
+color = "#0000008C"
+
+[appearance.blur]
+enabled = true
+passes = 3
+noise = 0.02
+brightness = 0.92
+contrast = 0.95
+saturation = 1.2
+
+[layout]
+mode = "dwindle"
+gap = 12
+
+[animation]
+enabled = true
+
+[animation.beziers]
+smoothOut = [0.05, 0.9, 0.1, 1.05]
+snappySpring = [0.175, 0.885, 0.32, 1.15]
+hyprSlide = [0.05, 0.9, 0.1, 1.10]
+
+[animation.workspaces]
+enabled = true
+duration_ms = 320
+curve = "smoothOut"
+
+[animation.windows_in]
+enabled = true
+duration_ms = 250
+curve = "smoothOut"
+style = "popin"
+scale = 0.85
+
+[animation.windows_out]
+enabled = true
+duration_ms = 200
+curve = "smoothOut"
+style = "fade"
+
+[animation.windows_move]
+enabled = true
+duration_ms = 300
+curve = "snappySpring"
+
+[animation.overview]
+enabled = true
+duration_ms = 350
+curve = "smoothOut"
+
+[animation.scratchpad]
+enabled = true
+duration_ms = 420
+curve = "snappySpring"
+scale = 0.82
+suspend_hidden = true
+
+[output.WL-1]
+mode = "1920x1080@60"
+
+[output.HEADLESS-1]
+mode = "1920x1080@60"
+
+[[scratchpad]]
+name = "web"
+direction = "top"
+scale = 0.84
+duration_ms = 420
+curve = "snappySpring"
+dim = 0.45
+blur = true
+layout = "master"
+gap = 12
+on_empty = "brave --app=file:///tmp/umbriel-doc.html"
+
+[[scratchpad]]
+name = "terminal"
+direction = "top"
+scale = 0.85
+duration_ms = 400
+curve = "snappySpring"
+dim = 0.40
+blur = true
+layout = "dwindle"
+gap = 12
+on_empty = "kitty --title 'special:terminal | Dwindle'"
+
+[[scratchpad]]
+name = "notes"
+direction = "bottom"
+scale = 0.65
+duration_ms = 420
+curve = "snappySpring"
+dim = 0.50
+blur = true
+layout = "dwindle"
+gap = 10
+on_empty = "kitty --title 'special:notes | Bottom Drawer'"
+
+[[scratchpad]]
+name = "sysmon"
+direction = "right"
+scale = 0.88
+duration_ms = 420
+curve = "snappySpring"
+dim = 0.45
+blur = true
+layout = "master"
+gap = 12
+on_empty = "kitty --title 'special:sysmon | Right Drawer' btop"
+
+[[scratchpad]]
+name = "music"
+direction = "left"
+scale = 0.75
+duration_ms = 420
+curve = "snappySpring"
+dim = 0.40
+blur = true
+layout = "master"
+gap = 12
+on_empty = "kitty --title 'special:music | Left Drawer'"
+
+[[scratchpad]]
+name = "floating"
+scale = 0.0
+duration_ms = 350
+curve = "smoothOut"
+dim = 0.30
+blur = false
+on_empty = "kitty --title 'special:floating | scale=0.0'"
+
+[keybinds]
+"Mod+Return"                  = "spawn:kitty"
+"Mod+Space"                   = "scratchpad-toggle"
+"Mod+W"                       = "scratchpad-toggle:web"
+"Mod+T"                       = "scratchpad-toggle:terminal"
+"Mod+N"                       = "scratchpad-toggle:notes"
+"Mod+S"                       = "scratchpad-toggle:sysmon"
+"Mod+M"                       = "scratchpad-toggle:music"
+"Mod+F"                       = "scratchpad-toggle:floating"
+"Mod+Shift+W"                 = "window-move-to-scratchpad:web"
+"Mod+Shift+T"                 = "window-move-to-scratchpad:terminal"
+"Mod+Shift+N"                 = "window-move-to-scratchpad:notes"
+"Mod+Shift+S"                 = "window-move-to-scratchpad:sysmon"
+"Mod+Shift+M"                 = "window-move-to-scratchpad:music"
+"Mod+Shift+F"                 = "window-move-to-scratchpad:floating"
+"Mod+Tab"                     = "scratchpad-focus-next"
+"Mod+O"                       = "overview-toggle"
+"Mod+Q"                       = "window-close"
+"Mod+Shift+Q"                 = "session-quit:skip-confirmation"
+
+# Special workspace alias keybindings
+"Mod+Alt+W"                   = "workspace-switch:special:web"
+"Mod+Alt+T"                   = "workspace-switch:special:terminal"
+"Mod+Alt+N"                   = "workspace-switch:special:notes"
+"Mod+Alt+S"                   = "workspace-switch:special:sysmon"
+"Mod+Alt+M"                   = "workspace-switch:special:music"
+
+[[window_rule]]
+match.app_id = "brave"
+scratchpad = "web"
+
+[[window_rule]]
+match.title = ".*special:web.*"
+scratchpad = "web"
+
+[[window_rule]]
+match.title = ".*special:terminal.*"
+scratchpad = "terminal"
+
+[[window_rule]]
+match.title = ".*special:notes.*"
+scratchpad = "notes"
+
+[[window_rule]]
+match.title = ".*special:sysmon.*"
+scratchpad = "sysmon"
+
+[[window_rule]]
+match.title = ".*special:music.*"
+scratchpad = "music"
+
+[[window_rule]]
+match.title = ".*special:floating.*"
+scratchpad = "floating"

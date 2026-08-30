@@ -2,6 +2,7 @@
 
 #include "config/config.h"
 #include "core/log.h"
+#include "input/gestures.h"
 #include "input/seat.h"
 #include "layer/layer_surface.h"
 #include "layout/drop_target.h"
@@ -45,6 +46,20 @@ namespace umbriel {
 
     bool isXdgPopupSurface(wlr_surface* surface) {
       return surface != nullptr && wlr_xdg_popup_try_from_wlr_surface(wlr_surface_get_root_surface(surface)) != nullptr;
+    }
+
+    // `[input.touchpad] scroll_factor` scales a touchpad's smooth scroll delta before it reaches the focused client.
+    // Reads the live config per event so a successful reload applies on the very next axis; non-touchpads and unset
+    // values stay at identity (1.0). Only the continuous delta is scaled, never the discrete value120 notches.
+    double touchpadScrollFactor(wlr_pointer* pointer) {
+      if (pointer == nullptr || !wlr_input_device_is_libinput(&pointer->base)) {
+        return 1.0;
+      }
+      libinput_device* device = wlr_libinput_get_device_handle(&pointer->base);
+      if (device == nullptr || libinput_device_config_tap_get_finger_count(device) == 0) {
+        return 1.0;
+      }
+      return config().input.touchpad.scrollFactor.value_or(1.0);
     }
 
     bool surfaceLocalCoordinates(wlr_scene* scene, wlr_surface* target, double lx, double ly, double* sx, double* sy) {
@@ -485,7 +500,17 @@ namespace umbriel {
         return;
       }
       Layout& layout = workspace->layout();
-      const uint32_t resolvedEdges = layout.resolveResizeEdges(view, edges, m_cursor->x, m_cursor->y);
+      uint32_t resolvedEdges = 0;
+      if (edges != 0) {
+        resolvedEdges = layout.resolveResizeEdges(view, edges, m_cursor->x, m_cursor->y);
+      } else {
+        const wlr_box presented = workspace->presentedTiledBox(view);
+        const wlr_box visible = workspace->usableArea();
+        wlr_box reachable{};
+        if (wlr_box_intersection(&reachable, &presented, &visible)) {
+          resolvedEdges = layout.sanitizeResizeEdges(view, resizeEdgesForPoint(reachable, m_cursor->x, m_cursor->y));
+        }
+      }
       if (resolvedEdges == 0) {
         if (workspace->focusedView() == view) {
           workspace->ensureFocusedVisible();
@@ -498,7 +523,7 @@ namespace umbriel {
       if (view->maximizedToEdges()) {
         view->setMaximizedToEdges(false);
       }
-      const wlr_box usable = workspace->group()->output()->usableArea();
+      const wlr_box usable = workspace->tiledArea();
       std::unique_ptr<ResizeGrab> session = layout.beginResize(view, resolvedEdges, usable);
       if (session == nullptr) {
         refreshInteractiveCursor();
@@ -566,6 +591,9 @@ namespace umbriel {
   void Cursor::resetMode() {
     m_server->hideInsertHint();
     View* view = grabbedView();
+    if (std::holds_alternative<ScrollDragGrab>(m_grab)) {
+      m_server->gestures()->endPointerScroll(true, 0);
+    }
     const bool restoreDragPresentation = std::holds_alternative<FloatingMoveGrab>(m_grab)
         || (std::get_if<TiledMoveGrab>(&m_grab) != nullptr && !std::get<TiledMoveGrab>(m_grab).pending);
     if (std::holds_alternative<FloatingResizeGrab>(m_grab) && view != nullptr) {
@@ -622,7 +650,7 @@ namespace umbriel {
   void Cursor::handleMotion(void* data) {
     auto* event = static_cast<wlr_pointer_motion_event*>(data);
     noteActivity();
-    m_server->notifyIdleActivity();
+    m_server->notifyInputActivity();
 
     wlr_relative_pointer_manager_v1_send_relative_motion(
         m_server->relativePointerManager(), m_server->seat()->wlr(), static_cast<uint64_t>(event->time_msec) * 1000,
@@ -656,7 +684,7 @@ namespace umbriel {
   void Cursor::handleMotionAbsolute(void* data) {
     auto* event = static_cast<wlr_pointer_motion_absolute_event*>(data);
     noteActivity();
-    m_server->notifyIdleActivity();
+    m_server->notifyInputActivity();
     if (m_activeConstraint != nullptr && m_activeConstraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED) {
       if (!constraintSurfaceActive()) {
         clearConstraint();
@@ -691,7 +719,11 @@ namespace umbriel {
 
   void Cursor::processButton(uint32_t timeMsec, uint32_t button, wl_pointer_button_state state) {
     noteActivity();
-    m_server->notifyIdleActivity();
+    if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
+      m_server->notifyInputActivity();
+    } else {
+      m_server->notifyIdleActivity();
+    }
     if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
       cancelHotCorner();
       m_server->cancelModifierTap();
@@ -706,19 +738,31 @@ namespace umbriel {
     // swallow their paired release so clients never see an unmatched release.
     if (state == WL_POINTER_BUTTON_STATE_PRESSED && isPassthrough()) {
       const uint32_t modifiers = m_server->keyboardModifiers();
-      const Keybind* bound = m_server->handleMouseBind(button, modifiers);
+      const std::optional<Keybind> bound = m_server->handleMouseBind(button, modifiers);
       // Any press dismisses the cheatsheet, as any key press does, except one that just ran a cheatsheet action. Unlike
       // a key press, an unbound press is consumed: the overlay hides whatever sits under the cursor, so the click that
       // dismisses it must not also reach that surface.
       if (Cheatsheet* sheet = m_server->cheatsheet();
-          sheet != nullptr && sheet->visible() && !(bound != nullptr && isCheatsheetAction(bound->action))) {
+          sheet != nullptr && sheet->visible() && !(bound.has_value() && isCheatsheetAction(bound->action))) {
         sheet->hide();
-        if (bound == nullptr) {
+        if (!bound.has_value()) {
           m_swallowedButtons.push_back(button);
           return;
         }
       }
-      if (bound != nullptr) {
+      if (bound.has_value()) {
+        if (bound->action == KeybindAction::LayoutScrollDrag && m_server->gestures()->beginPointerScroll()) {
+          setActiveConstraint(nullptr);
+          m_grab = ScrollDragGrab{
+              .button = button,
+              .lastX = m_cursor->x,
+              .lastY = m_cursor->y,
+          };
+          m_moveButton = button;
+          setCompositorCursor("grabbing");
+          wlr_seat_pointer_clear_focus(m_server->seat()->wlr());
+          return;
+        }
         m_swallowedButtons.push_back(button);
         return;
       }
@@ -745,6 +789,20 @@ namespace umbriel {
         m_swallowedButtons.push_back(button);
       }
       return;
+    }
+
+    if (state == WL_POINTER_BUTTON_STATE_RELEASED) {
+      if (auto* grab = std::get_if<ScrollDragGrab>(&m_grab)) {
+        if (button == grab->button) {
+          m_server->gestures()->endPointerScroll(m_server->sessionLocked(), timeMsec);
+          resetMode();
+          // The grab cleared client focus on press and consumed every motion.
+          // Re-run hit testing so hover/focus is correct without requiring the
+          // user to jiggle the mouse after release.
+          processMotion(timeMsec, m_cursor->x, m_cursor->y);
+        }
+        return;
+      }
     }
 
     // Overview owns the pointer while it is up: cards are its own hit-test surface and the desktop underneath is inert.
@@ -886,7 +944,11 @@ namespace umbriel {
   void Cursor::handleAxis(void* data) {
     auto* event = static_cast<wlr_pointer_axis_event*>(data);
     noteActivity();
-    m_server->notifyIdleActivity();
+    if (event->delta == 0 && event->delta_discrete == 0) {
+      m_server->notifyIdleActivity();
+    } else {
+      m_server->notifyInputActivity();
+    }
     m_server->cancelModifierTap();
     cancelHotCorner();
 
@@ -943,8 +1005,9 @@ namespace umbriel {
     const int orientation = isVertical ? 0 : 1;
     if (!armed) {
       m_wheelAccum[orientation] = 0;
+      const double scale = touchpadScrollFactor(event->pointer);
       wlr_seat_pointer_notify_axis(
-          m_server->seat()->wlr(), event->time_msec, event->orientation, event->delta, event->delta_discrete,
+          m_server->seat()->wlr(), event->time_msec, event->orientation, event->delta * scale, event->delta_discrete,
           event->source, event->relative_direction
       );
       return;
@@ -1006,7 +1069,7 @@ namespace umbriel {
 
   void Cursor::handleTouchDown(void* data) {
     auto* event = static_cast<wlr_touch_down_event*>(data);
-    m_server->notifyIdleActivity();
+    m_server->notifyInputActivity();
     m_server->cancelModifierTap();
 
     double lx = 0;
@@ -1052,7 +1115,7 @@ namespace umbriel {
 
   void Cursor::handleTouchMotion(void* data) {
     auto* event = static_cast<wlr_touch_motion_event*>(data);
-    m_server->notifyIdleActivity();
+    m_server->notifyInputActivity();
 
     wlr_seat* seat = m_server->seat()->wlr();
     wlr_touch_point* point = wlr_seat_touch_get_point(seat, event->touch_id);
@@ -1106,6 +1169,17 @@ namespace umbriel {
 
   void Cursor::processMotion(uint32_t timeMsec, double oldX, double oldY, bool allowFocusChange) {
     updateHotCorner();
+    if (auto* grab = std::get_if<ScrollDragGrab>(&m_grab)) {
+      if (m_server->sessionLocked()) {
+        m_server->gestures()->endPointerScroll(true, timeMsec);
+        resetMode();
+      } else {
+        m_server->gestures()->updatePointerScroll(m_cursor->x - grab->lastX, m_cursor->y - grab->lastY, timeMsec);
+        grab->lastX = m_cursor->x;
+        grab->lastY = m_cursor->y;
+      }
+      return;
+    }
     // Overview owns motion: cards follow a drag, panels keep passthrough, and
     // the inert desktop underneath never receives enter/motion or hover focus.
     if (Overview* overview = m_server->overview(); overview != nullptr
@@ -1420,7 +1494,7 @@ namespace umbriel {
   void Cursor::handleTabletToolAxis(void* data) {
     auto* event = static_cast<wlr_tablet_tool_axis_event*>(data);
     noteActivity();
-    m_server->notifyIdleActivity();
+    m_server->notifyInputActivity();
     TabletToolState* state = toolState(event->tool);
     const double oldX = m_cursor->x;
     const double oldY = m_cursor->y;
@@ -1460,7 +1534,11 @@ namespace umbriel {
   void Cursor::handleTabletToolProximity(void* data) {
     auto* event = static_cast<wlr_tablet_tool_proximity_event*>(data);
     noteActivity();
-    m_server->notifyIdleActivity();
+    if (event->state == WLR_TABLET_TOOL_PROXIMITY_IN) {
+      m_server->notifyInputActivity();
+    } else {
+      m_server->notifyIdleActivity();
+    }
     if (event->state == WLR_TABLET_TOOL_PROXIMITY_IN) {
       TabletToolState* state = toolState(event->tool);
       state->x = event->x;
@@ -1497,7 +1575,11 @@ namespace umbriel {
   void Cursor::handleTabletToolTip(void* data) {
     auto* event = static_cast<wlr_tablet_tool_tip_event*>(data);
     noteActivity();
-    m_server->notifyIdleActivity();
+    if (event->state == WLR_TABLET_TOOL_TIP_DOWN) {
+      m_server->notifyInputActivity();
+    } else {
+      m_server->notifyIdleActivity();
+    }
     if (event->state == WLR_TABLET_TOOL_TIP_DOWN) {
       m_server->cancelModifierTap();
     }
@@ -1537,7 +1619,11 @@ namespace umbriel {
   void Cursor::handleTabletToolButton(void* data) {
     auto* event = static_cast<wlr_tablet_tool_button_event*>(data);
     noteActivity();
-    m_server->notifyIdleActivity();
+    if (event->state == WLR_BUTTON_PRESSED) {
+      m_server->notifyInputActivity();
+    } else {
+      m_server->notifyIdleActivity();
+    }
     TabletToolState* state = toolState(event->tool);
     const bool pressed = event->state == WLR_BUTTON_PRESSED;
     if (!state->emulating) {
@@ -1769,21 +1855,26 @@ namespace umbriel {
     if (view->workspace() == nullptr) {
       return 0;
     }
-    const wlr_box box = view->workspace()->layout().targetBox(view);
+    Workspace* workspace = view->workspace();
+    const wlr_box box = workspace->presentedTiledBox(view);
     if (box.width <= 0 || box.height <= 0) {
       return 0;
     }
-    uint32_t edges = view->workspace()->layout().resizeEdgesAt(view, m_cursor->x, m_cursor->y);
+    wlr_box reachable = box;
+    if (workspace->group() != nullptr && workspace->group()->output() != nullptr) {
+      const wlr_box usable = workspace->usableArea();
+      if (!wlr_box_intersection(&reachable, &box, &usable)) {
+        return 0;
+      }
+    }
+    uint32_t edges =
+        workspace->layout().sanitizeResizeEdges(view, resizeEdgesForPoint(reachable, m_cursor->x, m_cursor->y));
     // Advertise an edge that extends past the output from the reachable
     // output boundary, since the pointer cannot approach the real edge.
-    wlr_box usable = box;
-    if (view->workspace()->group() != nullptr && view->workspace()->group()->output() != nullptr) {
-      usable = view->workspace()->group()->output()->usableArea();
-    }
-    const double left = std::max<double>(box.x, usable.x);
-    const double right = std::min<double>(box.x + box.width, usable.x + usable.width);
-    const double top = std::max<double>(box.y, usable.y);
-    const double bottom = std::min<double>(box.y + box.height, usable.y + usable.height);
+    const double left = reachable.x;
+    const double right = reachable.x + reachable.width;
+    const double top = reachable.y;
+    const double bottom = reachable.y + reachable.height;
     if ((edges & (WLR_EDGE_LEFT | WLR_EDGE_RIGHT)) != 0) {
       const double dist = (edges & WLR_EDGE_LEFT) != 0 ? std::abs(m_cursor->x - left) : std::abs(m_cursor->x - right);
       if (dist > kHoverSlop) {
@@ -1897,7 +1988,7 @@ namespace umbriel {
       resetMode();
       return;
     }
-    const wlr_box usable = grab->workspace->group()->output()->usableArea();
+    const wlr_box usable = grab->workspace->tiledArea();
     grab->session->applyDelta(m_cursor->x - grab->startX, m_cursor->y - grab->startY, usable);
     wlr_xdg_toplevel_set_maximized(grab->view->toplevel(), false);
     grab->workspace->markArrange(false);

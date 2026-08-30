@@ -28,6 +28,7 @@ namespace umbriel {
   class Server;
   class View;
   class WorkspaceGroup;
+  struct OutputIdentity;
 
   class Output {
   public:
@@ -40,6 +41,7 @@ namespace umbriel {
     Output& operator=(const Output&) = delete;
 
     [[nodiscard]] wlr_output* wlr() const { return m_output; }
+    [[nodiscard]] OutputIdentity identity() const;
     [[nodiscard]] wlr_scene_output* sceneOutput() const { return m_sceneOutput; }
     [[nodiscard]] wlr_scene_tree* layerTree(uint32_t layer) const;
     [[nodiscard]] wlr_scene_tree* popupTree() const { return m_popupTree; }
@@ -134,6 +136,7 @@ namespace umbriel {
 
     Server* m_server = nullptr;
     wlr_output* m_output = nullptr;
+    float m_defaultScale = 1.0F;
     wlr_scene_output* m_sceneOutput = nullptr;
     wlr_scene_tree* m_layerTrees[kLayerCount]{};
     wlr_scene_tree* m_popupTree = nullptr;
@@ -158,6 +161,7 @@ namespace umbriel {
     bool m_lastHdrRequested = false;
     bool m_lastCommitTearing = false;
     bool m_trackingPresentation = false;
+    bool m_appliedConfiguredScale = false;
     wl_event_source* m_frameRetryTimer = nullptr;
     View* m_autoHdrOwner = nullptr;
     std::string m_hdrFallbackReason;

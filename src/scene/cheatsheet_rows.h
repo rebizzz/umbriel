@@ -9,6 +9,7 @@
 
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace umbriel {
@@ -28,11 +29,16 @@ namespace umbriel {
   // it has to hold whole.
   [[nodiscard]] int balancedColumnHeight(std::span<const int> blockSizes, int numCols);
 
+  // Display columns occupied by a generated chord in the cheatsheet's
+  // monospace font.
+  [[nodiscard]] size_t cheatsheetChordColumns(std::string_view chord);
+
   struct CheatsheetRow {
     std::string chord;  // display chord(s)
     std::string action; // display action (full label for non-spawn, args-only for spawn)
     KeybindAction actionType = KeybindAction::None;
     std::string submap;      // source submap (empty = top-level)
+    std::string submapAfter; // optional transition after the action
     std::string spawnBinary; // basename of spawn command (empty for non-spawn)
     std::string spawnArgs;   // args portion of spawn command
     // For workspace collapse detection.

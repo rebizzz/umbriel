@@ -29,13 +29,13 @@
 #include "xwayland/supervisor.h"
 
 #include <algorithm>
+#include <array>
 #include <csignal>
 #include <cstdlib>
 #include <ranges>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <sys/wait.h>
 #include <unistd.h>
 
 namespace umbriel {
@@ -44,14 +44,57 @@ namespace umbriel {
 
     constexpr Logger kLog("server");
     constexpr size_t kWaylandClientBufferSize = 1024 * 1024;
+    // Security-context clients only receive reviewed, ordinary application
+    // protocols. New globals stay unavailable until they are classified here.
+    constexpr std::array<std::string_view, 28> kAllowedSecurityContextGlobals{
+        "wl_shm",
+        "wl_drm",
+        "zwp_linux_dmabuf_v1",
+        "wp_linux_drm_syncobj_manager_v1",
+        "wl_compositor",
+        "wl_subcompositor",
+        "wl_data_device_manager",
+        "zwp_primary_selection_device_manager_v1",
+        "wp_viewporter",
+        "wp_fractional_scale_manager_v1",
+        "wp_presentation",
+        "wp_tearing_control_manager_v1",
+        "wp_content_type_manager_v1",
+        "wl_output",
+        "wp_color_manager_v1",
+        "xdg_wm_base",
+        "xdg_toplevel_tag_manager_v1",
+        "zxdg_decoration_manager_v1",
+        "org_kde_kwin_server_decoration_manager",
+        "zwp_relative_pointer_manager_v1",
+        "zwp_pointer_constraints_v1",
+        "zwp_pointer_gestures_v1",
+        "zwp_tablet_manager_v2",
+        "zwp_idle_inhibit_manager_v1",
+        "xdg_activation_v1",
+        "wl_seat",
+        "wp_cursor_shape_manager_v1",
+        "zwp_text_input_manager_v3",
+    };
+
+    bool isAllowedSecurityContextGlobal(std::string_view interface) {
+      return std::ranges::find(kAllowedSecurityContextGlobals, interface) != kAllowedSecurityContextGlobals.end();
+    }
 
     bool filterGlobal(const wl_client* client, const wl_global* global, void* data) {
       auto* server = static_cast<Server*>(data);
       const wl_interface* interface = wl_global_get_interface(global);
-      if (interface != nullptr && std::string_view(interface->name) == "zwp_primary_selection_device_manager_v1") {
+      if (interface == nullptr) {
+        return true;
+      }
+      const std::string_view interfaceName(interface->name);
+      if (server->clientHasSecurityContext(client) && !isAllowedSecurityContextGlobal(interfaceName)) {
+        return false;
+      }
+      if (interfaceName == "zwp_primary_selection_device_manager_v1") {
         return config().input.middleClickPaste;
       }
-      if (interface != nullptr && std::string_view(interface->name) == "wp_color_manager_v1") {
+      if (interfaceName == "wp_color_manager_v1") {
         const bool wine = WineColorManager::clientNeedsCompatibility(client);
         if (server->wineColorManager() != nullptr && global == server->wineColorManager()->global()) {
           return wine;
@@ -61,32 +104,76 @@ namespace umbriel {
       return true;
     }
 
+    std::string shellQuote(std::string_view value) {
+      std::string quoted("'");
+      for (const char character : value) {
+        if (character == '\'') {
+          quoted += "'\\''";
+        } else {
+          quoted += character;
+        }
+      }
+      quoted += '\'';
+      return quoted;
+    }
+
     void applyConfiguredEnvironment() {
       for (const auto& [name, value] : config().environment.variables) {
-        if (name.empty()) {
-          continue;
-        }
         if (setenv(name.c_str(), value.c_str(), 1) != 0) {
           kLog.warn("failed to export environment variable {}", name);
         }
       }
     }
 
-    void synchronizeSessionEnvironment() {
-      constexpr std::string_view command =
-          "variables='WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE "
-          "UMBRIEL_SOCKET'; "
-          "if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then "
-          "systemctl --user import-environment $variables; fi; "
-          "if command -v dbus-update-activation-environment >/dev/null 2>&1; then "
-          "dbus-update-activation-environment $variables; fi";
-      const int status = std::system(command.data());
-      if (status == -1 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        kLog.warn("failed to synchronize the session environment");
+    std::string sessionEnvironmentCommand() {
+      std::string configuredAssignments;
+      for (const auto& [name, value] : config().environment.variables) {
+        configuredAssignments += ' ';
+        configuredAssignments += shellQuote(name + "=" + value);
       }
+
+      const std::string publishConfigured =
+          configuredAssignments.empty() ? "" : " && systemctl --user set-environment" + configuredAssignments;
+      std::string command =
+          "variables='WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE "
+          "UMBRIEL_SOCKET'; systemd_ready=false; "
+          "if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then "
+          "if systemctl --user import-environment $variables";
+      command += publishConfigured;
+      command += "; then systemd_ready=true; else "
+                 "echo 'umbriel: failed to publish the session environment' >&2; fi; fi; "
+                 "if command -v dbus-update-activation-environment >/dev/null 2>&1; then "
+                 "dbus-update-activation-environment $variables || "
+                 "echo 'umbriel: failed to update the D-Bus activation environment' >&2; fi; "
+                 "if $systemd_ready; then systemctl --user start --no-block umbriel-session.target || "
+                 "echo 'umbriel: failed to start the systemd session target' >&2; fi";
+      return command;
     }
 
   } // namespace
+
+  bool Server::clientHasSecurityContext(const wl_client* client) const {
+    return m_securityContextManager != nullptr
+        && wlr_security_context_manager_v1_lookup_client(m_securityContextManager, client) != nullptr;
+  }
+
+  ContentType Server::surfaceContentType(wlr_surface* surface) const {
+    if (m_contentTypeManager == nullptr || surface == nullptr) {
+      return ContentType::None;
+    }
+    switch (wlr_surface_get_content_type_v1(m_contentTypeManager, surface)) {
+    case WP_CONTENT_TYPE_V1_TYPE_PHOTO:
+      return ContentType::Photo;
+    case WP_CONTENT_TYPE_V1_TYPE_VIDEO:
+      return ContentType::Video;
+    case WP_CONTENT_TYPE_V1_TYPE_GAME:
+      return ContentType::Game;
+    case WP_CONTENT_TYPE_V1_TYPE_NONE:
+    default:
+      return ContentType::None;
+    }
+  }
+
   bool Server::isXwaylandSurface(const wlr_surface* surface) const {
     if (m_xwayland == nullptr || surface == nullptr || surface->resource == nullptr) {
       return false;
@@ -156,6 +243,10 @@ namespace umbriel {
     if (wlr_primary_selection_v1_device_manager_create(m_display) == nullptr) {
       throw std::runtime_error("failed to create primary-selection manager");
     }
+    m_securityContextManager = wlr_security_context_manager_v1_create(m_display);
+    if (m_securityContextManager == nullptr) {
+      throw std::runtime_error("failed to create security-context manager");
+    }
     wl_display_set_global_filter(m_display, filterGlobal, this);
     wlr_viewporter_create(m_display);
     wlr_fractional_scale_manager_v1_create(m_display, 1);
@@ -163,6 +254,10 @@ namespace umbriel {
     m_tearingControlManager = wlr_tearing_control_manager_v1_create(m_display, 1);
     if (m_tearingControlManager == nullptr) {
       throw std::runtime_error("failed to create tearing-control manager");
+    }
+    m_contentTypeManager = wlr_content_type_manager_v1_create(m_display, 1);
+    if (m_contentTypeManager == nullptr) {
+      throw std::runtime_error("failed to create content-type manager");
     }
     wlr_ext_data_control_manager_v1_create(m_display, 1);
 
@@ -264,6 +359,13 @@ namespace umbriel {
     m_newXdgPopup.notify = onNewXdgPopup;
     wl_signal_add(&m_xdgShell->events.new_popup, &m_newXdgPopup);
 
+    m_xdgToplevelTagManager = wlr_xdg_toplevel_tag_manager_v1_create(m_display, 1);
+    if (m_xdgToplevelTagManager == nullptr) {
+      throw std::runtime_error("failed to create XDG toplevel tag manager");
+    }
+    m_setXdgToplevelTag.notify = onSetXdgToplevelTag;
+    wl_signal_add(&m_xdgToplevelTagManager->events.set_tag, &m_setXdgToplevelTag);
+
     m_xdgDecorationManager = wlr_xdg_decoration_manager_v1_create(m_display);
     m_newXdgDecoration.notify = onNewXdgDecoration;
     wl_signal_add(&m_xdgDecorationManager->events.new_toplevel_decoration, &m_newXdgDecoration);
@@ -355,6 +457,7 @@ namespace umbriel {
     wl_list_remove(&m_newOutput.link);
     wl_list_remove(&m_newInput.link);
     wl_list_remove(&m_newXdgToplevel.link);
+    wl_list_remove(&m_setXdgToplevelTag.link);
     wl_list_remove(&m_newXdgPopup.link);
     wl_list_remove(&m_newXdgDecoration.link);
     wl_list_remove(&m_newLayerSurface.link);
@@ -520,27 +623,22 @@ namespace umbriel {
       setenv("XCURSOR_THEME", cursorCfg.theme.c_str(), 1);
     }
 
-    // Export user-defined environment variables from config.
-    applyConfiguredEnvironment();
-
-    // Start xwayland-satellite before autostart so X11 apps in autostart can
-    // connect (there is still a small race against satellite's socket bind).
+    // Start xwayland-satellite before session services and autostart so X11
+    // applications can connect. The supervisor applies configured values in
+    // the child while this process retains its session-control environment.
     if (config().general.xwayland) {
       m_xwayland = std::make_unique<XwaylandSupervisor>(wl_display_get_event_loop(m_display), m_socketName);
       m_xwayland->start();
     }
 
-    // Synchronize before starting the target so its services inherit the
-    // compositor environment rather than stale login manager values.
+    // Fork session synchronization before applying configured values locally.
+    // Its child keeps the inherited PATH and bus addresses, while the target
+    // receives the explicit configured assignments before it starts.
     if (!m_nested) {
-      synchronizeSessionEnvironment();
-      // Notify systemd that the graphical session is ready so user services
-      // gated on graphical-session.target (xdg-desktop-portal, etc.) can start.
-      spawn(
-          "if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; "
-          "then systemctl --user start --no-block umbriel-session.target; fi"
-      );
+      const std::string command = sessionEnvironmentCommand();
+      spawn(command.c_str(), "session environment synchronization");
     }
+    applyConfiguredEnvironment();
     if (startupCmd != nullptr) {
       spawn(startupCmd);
     }
@@ -658,16 +756,32 @@ namespace umbriel {
     return m_shellLayerTrees[layer];
   }
 
-  void Server::spawn(const char* command) {
+  pid_t Server::spawn(const char* command, const char* description, bool withActivationToken) {
     if (m_socketName.empty()) {
       wlr_log(WLR_ERROR, "cannot spawn before the Wayland socket exists");
-      return;
+      return -1;
+    }
+
+    wlr_xdg_activation_token_v1* launchToken = nullptr;
+    std::string launchTokenName;
+    if (withActivationToken && m_xdgActivation != nullptr) {
+      launchToken = wlr_xdg_activation_token_v1_create(m_xdgActivation);
+      if (launchToken != nullptr) {
+        trackActivationToken(launchToken, true);
+        const char* name = wlr_xdg_activation_token_v1_get_name(launchToken);
+        if (name != nullptr) {
+          launchTokenName = name;
+        }
+      }
     }
 
     pid_t pid = fork();
     if (pid < 0) {
+      if (launchToken != nullptr) {
+        wlr_xdg_activation_token_v1_destroy(launchToken);
+      }
       wlr_log(WLR_ERROR, "fork failed");
-      return;
+      return -1;
     }
     if (pid == 0) {
       resetChildSignalState();
@@ -680,11 +794,22 @@ namespace umbriel {
         // Avoid X11/XWayland fallback into the parent session.
         unsetenv("DISPLAY");
       }
+      if (!launchTokenName.empty()) {
+        setenv("XDG_ACTIVATION_TOKEN", launchTokenName.c_str(), 1);
+        setenv("DESKTOP_STARTUP_ID", launchTokenName.c_str(), 1);
+      } else {
+        unsetenv("XDG_ACTIVATION_TOKEN");
+        unsetenv("DESKTOP_STARTUP_ID");
+      }
       execl("/bin/sh", "/bin/sh", "-c", command, nullptr);
       _exit(1);
     }
 
-    wlr_log(WLR_INFO, "spawned '%s' on WAYLAND_DISPLAY=%s", command, m_socketName.c_str());
+    wlr_log(
+        WLR_INFO, "spawned '%s' on WAYLAND_DISPLAY=%s (pid=%d)", description == nullptr ? command : description,
+        m_socketName.c_str(), pid
+    );
+    return pid;
   }
 
   void Server::updateSeatCapabilities() { m_seat->updateCapabilities(!m_keyboards.empty(), !m_touchDevices.empty()); }

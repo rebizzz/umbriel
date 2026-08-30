@@ -41,14 +41,16 @@ namespace umbriel {
 
     void insertView(View* view, int columnIndex) override;
     void insertViewIntoColumn(View* view, int columnIndex, int rowIndex) override;
-    bool consumeLeft(View* view) override;
-    bool expelRight(View* view) override;
+    bool consume(View* view, int direction) override;
+    bool expel(View* view, int direction) override;
     bool moveViewVertical(View* view, int direction) override;
+    bool swapViews(View* a, View* b) override;
     void removeView(View* view) override;
     void moveColumn(int from, int to) override;
     // Raw scroll mutation. `centeredRest` is true only when restoring a saved column-center resting position.
     void setScroll(double scroll, bool centeredRest = false);
     bool centerColumn(int columnIndex, int viewportPrimary);
+    void reconcileFocusedColumn(int columnIndex, int viewportPrimary);
     [[nodiscard]] bool centeredRest() const { return m_centeredRest; }
     // How much to subtract from the scroll offset when `columnIndex` is about
     // to lose its last view. Removing a lane closes the primary-axis space it
@@ -61,14 +63,17 @@ namespace umbriel {
     [[nodiscard]] double scrollAmountToEnsureVisible(int columnIndex, int viewportPrimary) const;
     void arrange(const wlr_box& usable) override;
     [[nodiscard]] wlr_box targetBox(const View* view) const override;
-    [[nodiscard]] InitialSize
-    initialSize(const wlr_box& usable, std::optional<double> ruleWidthFraction) const override;
+    [[nodiscard]] InitialSize initialSize(
+        const wlr_box& usable, std::optional<double> ruleWidthFraction, const View* /*splitAnchor*/
+    ) const override;
 
     bool cycleWidth(int columnIndex, int direction) override;
     bool toggleFullWidth(int columnIndex) override;
     bool setWidthFraction(int columnIndex, double fraction) override;
     void clearFullWidthState(int columnIndex) override;
     [[nodiscard]] double widthFraction(int columnIndex) const override;
+    [[nodiscard]] double heightFraction(const View* view) const override;
+    bool setHeightFraction(View* view, double fraction) override;
 
     [[nodiscard]] uint32_t resizeEdgesAt(const View* view, double cx, double cy) const override;
     [[nodiscard]] uint32_t sanitizeResizeEdges(const View* view, uint32_t edges) const override;
@@ -96,6 +101,7 @@ namespace umbriel {
     [[nodiscard]] int centeringOffset(int viewportPrimary) const;
     [[nodiscard]] double targetScrollForEnsureVisible(int columnIndex, int viewportPrimary, bool force = false) const;
     [[nodiscard]] bool vertical() const;
+    [[nodiscard]] bool expandSingleColumn() const;
     void syncHeightWeights(Column& column);
 
     std::vector<Column> m_columns;

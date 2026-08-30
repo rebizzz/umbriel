@@ -1,6 +1,8 @@
 #include "check.h"
 #include "config/store.h"
 
+#include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -10,9 +12,11 @@
 
 using umbriel::ConfigDiagnostic;
 using umbriel::ConfigStore;
+using umbriel::ContentType;
 using umbriel::HdrMode;
 using umbriel::LayoutMode;
 using umbriel::ModifierKey;
+using umbriel::TrackLayout;
 using umbriel::VrrMode;
 
 namespace {
@@ -149,6 +153,8 @@ width_presets = [0.05, 0.5, 2.0]
 [layout.scrolling]
 center_underfull_strip = false
 always_center_single_column = true
+[layout.dwindle]
+preserve_split = true
 
 [output.DP-1]
 workspaces = ["dev"]
@@ -163,6 +169,8 @@ width_presets = [0.25, 0.75]
 
 [workspace.layout.scrolling]
 center_underfull_strip = true
+[workspace.layout.dwindle]
+preserve_split = false
 )");
 
   ConfigStore& store = umbriel::configStore();
@@ -176,6 +184,7 @@ center_underfull_strip = true
   CHECK_EQ(store.config().layout.widthPresets[1], 0.5);
   CHECK_EQ(store.config().layout.widthPresets[2], 1.0);
   CHECK(!store.config().layout.scrolling.centerUnderfullStrip);
+  CHECK(store.config().layout.dwindle.preserveSplit);
   CHECK(store.config().appearance.preferNoCsd);
   CHECK_EQ(store.config().outputs.size(), size_t{1});
   CHECK(store.config().outputs[0].scale.has_value());
@@ -185,10 +194,66 @@ center_underfull_strip = true
   CHECK(store.config().workspaceRules[0].layout.widthPresets.has_value());
   CHECK_EQ(store.config().workspaceRules[0].layout.widthPresets->size(), size_t{2});
   CHECK(store.config().workspaceRules[0].layout.scrolling.centerUnderfullStrip == true);
+  CHECK(store.config().workspaceRules[0].layout.dwindle.preserveSplit == false);
   CHECK(containsDiagnostic(store, "unknown key unknown_root_key"));
   CHECK(containsDiagnostic(store, "output.DP-1.scale = 9"));
   CHECK(containsDiagnostic(store, "unknown key layout.scrolling.always_center_single_column"));
   CHECK(containsDiagnostic(store, "unknown key general.prefer_no_csd"));
+}
+
+UMBRIEL_TEST(backgroundDefaultsOpaque) {
+  const umbriel::Config config;
+  CHECK_EQ(config.colors.background[3], 1.0F);
+}
+
+UMBRIEL_TEST(dwindlePreserveSplitDefaultsToFalse) {
+  const TempConfig file;
+  file.write("[layout]\n");
+  ConfigStore& store = umbriel::configStore();
+  store.setRootPath(file.path(), true);
+  CHECK(store.reload().success);
+  CHECK(!store.config().layout.dwindle.preserveSplit);
+}
+
+UMBRIEL_TEST(layoutStrutsLoadGloballyAndPerWorkspace) {
+  const TempConfig file;
+  file.write(R"(
+[layout.struts]
+left = -12
+right = 24
+top = 36
+bottom = -48
+surprise = 1
+
+[output.DP-1]
+workspaces = ["dev"]
+
+[[workspace]]
+name = "dev"
+
+[workspace.layout.struts]
+left = 50
+bottom = -8
+)");
+
+  ConfigStore& store = umbriel::configStore();
+  store.setRootPath(file.path(), true);
+  const umbriel::ConfigReloadResult result = store.reload();
+
+  CHECK(result.success);
+  CHECK_EQ(store.config().layout.struts.left, -12);
+  CHECK_EQ(store.config().layout.struts.right, 24);
+  CHECK_EQ(store.config().layout.struts.top, 36);
+  CHECK_EQ(store.config().layout.struts.bottom, -48);
+  CHECK_EQ(store.config().workspaceRules.size(), size_t{1});
+  const auto& overrides = store.config().workspaceRules[0].layout.struts;
+  CHECK(overrides.left.has_value());
+  CHECK_EQ(*overrides.left, 50);
+  CHECK(!overrides.right.has_value());
+  CHECK(!overrides.top.has_value());
+  CHECK(overrides.bottom.has_value());
+  CHECK_EQ(*overrides.bottom, -8);
+  CHECK(containsDiagnostic(store, "unknown key layout.struts.surprise"));
 }
 
 UMBRIEL_TEST(masterLayoutReadersLoadGlobalAndWorkspaceSettings) {
@@ -200,6 +265,7 @@ mode = "master"
 [layout.master]
 position = "right"
 default_width_fraction = 0.05
+new_on_top = false
 surprise = true
 
 [output.DP-1]
@@ -211,6 +277,7 @@ name = "dev"
 [workspace.layout.master]
 position = "left"
 default_width_fraction = 0.7
+new_on_top = true
 )");
 
   ConfigStore& store = umbriel::configStore();
@@ -221,10 +288,12 @@ default_width_fraction = 0.7
   CHECK(store.config().layout.mode == LayoutMode::Master);
   CHECK(store.config().layout.master.position == umbriel::MasterPosition::Right);
   CHECK_EQ(store.config().layout.master.defaultWidthFraction, 0.1);
+  CHECK(!store.config().layout.master.newOnTop);
   CHECK_EQ(store.config().workspaceRules.size(), size_t{1});
   CHECK(store.config().workspaceRules[0].layout.master.position == umbriel::MasterPosition::Left);
   CHECK(store.config().workspaceRules[0].layout.master.defaultWidthFraction.has_value());
   CHECK_EQ(*store.config().workspaceRules[0].layout.master.defaultWidthFraction, 0.7);
+  CHECK(store.config().workspaceRules[0].layout.master.newOnTop == true);
   CHECK(containsDiagnostic(store, "layout.master.default_width_fraction = 0.05 out of range, clamped to 0.1"));
   CHECK(containsDiagnostic(store, "unknown key layout.master.surprise"));
 }
@@ -246,6 +315,25 @@ UMBRIEL_TEST(scrollingDefaultWidthIsOptional) {
   file.write("[layout.scrolling]\ncenter_underfull_strip = true\n");
   CHECK(store.reload().success);
   CHECK(!store.config().layout.scrolling.defaultWidthFraction.has_value());
+}
+
+UMBRIEL_TEST(expandSingleColumnParsesAndDefaultsToFalse) {
+  const TempConfig file;
+  ConfigStore& store = umbriel::configStore();
+  store.setRootPath(file.path(), true);
+
+  file.write("");
+
+  CHECK(store.reload().success);
+  CHECK(!store.config().layout.scrolling.expandSingleColumn);
+
+  file.write("[layout.scrolling]\nexpand_single_column = true\n");
+  CHECK(store.reload().success);
+  CHECK(store.config().layout.scrolling.expandSingleColumn);
+
+  file.write("[layout.scrolling]\nexpand_single_column = false\n");
+  CHECK(store.reload().success);
+  CHECK(!store.config().layout.scrolling.expandSingleColumn);
 }
 
 UMBRIEL_TEST(modKeyIsUserConfigurable) {
@@ -289,6 +377,47 @@ UMBRIEL_TEST(keybindTableLoadsAllowWhenLocked) {
   CHECK(allowedWhenLocked);
   CHECK(defaultsToBlocked);
   CHECK(!containsDiagnostic(store, "allow_when_locked"));
+}
+
+UMBRIEL_TEST(keybindTableLoadsPostActionSubmaps) {
+  const TempConfig file;
+  ConfigStore& store = umbriel::configStore();
+  store.setRootPath(file.path(), true);
+
+  file.write(
+      "[keybinds]\n"
+      "\"submap[outer],1\" = { action = \"workspace-switch:2\", submap = \"reset\" }\n"
+      "\"submap[outer],2\" = { action = \"workspace-switch:3\", submap = \"inner\", repeat = true }\n"
+      "\"submap[outer],3\" = { action = \"workspace-switch:4\", repeat = true }\n"
+  );
+  CHECK(store.reload().success);
+
+  bool resets = false;
+  bool entersInner = false;
+  bool remainsPersistent = false;
+  for (const auto& bind : store.config().keybinds) {
+    if (!bind.submapAfter.has_value()) {
+      remainsPersistent = remainsPersistent || (bind.submap == "outer" && bind.repeat);
+      continue;
+    }
+    CHECK(!bind.repeat);
+    resets = resets || umbriel::isSubmapReset(*bind.submapAfter);
+    entersInner = entersInner || bind.submapAfter->name == "inner";
+  }
+  CHECK(resets);
+  CHECK(entersInner);
+  CHECK(remainsPersistent);
+  CHECK(!containsDiagnostic(store, "submap"));
+
+  file.write(
+      "[keybinds]\n"
+      "\"submap[outer],1\" = { action = \"workspace-switch:2\", submap = \"\" }\n"
+      "\"submap[outer],2\" = { action = \"workspace-switch:3\", submap = \"disable\" }\n"
+      "\"submap[outer],3\" = { action = \"workspace-switch:4\", submap = \"invalid]name\" }\n"
+  );
+  CHECK(store.reload().success);
+  CHECK(containsDiagnostic(store, "submap must be a non-empty name"));
+  CHECK(std::ranges::none_of(store.config().keybinds, [](const auto& bind) { return bind.submap == "outer"; }));
 }
 
 UMBRIEL_TEST(hotCornersLoadActionsAndValidate) {
@@ -336,6 +465,60 @@ UMBRIEL_TEST(overviewBackgroundBlurLoads) {
   CHECK(!store.config().overview.backgroundBlur);
 }
 
+UMBRIEL_TEST(overviewShortcutConfigurationLoads) {
+  const TempConfig file;
+  ConfigStore& store = umbriel::configStore();
+  store.setRootPath(file.path(), true);
+
+  file.write("[overview]\nshortcuts = false\nshortcut_keys = \"asdf\"\nbadge_color = \"#12345678\"\n");
+  CHECK(store.reload().success);
+  CHECK(!store.config().overview.shortcuts);
+  CHECK_EQ(store.config().overview.shortcutKeys, std::string{"asdf"});
+  CHECK(store.config().overview.badgeColor.has_value());
+  const std::array<float, 4> badgeColor = store.config().overview.badgeColor.value_or(std::array<float, 4>{});
+  CHECK_EQ(badgeColor[0], 18.0F / 255.0F);
+  CHECK_EQ(badgeColor[1], 52.0F / 255.0F);
+  CHECK_EQ(badgeColor[2], 86.0F / 255.0F);
+  CHECK_EQ(badgeColor[3], 120.0F / 255.0F);
+}
+
+UMBRIEL_TEST(overviewShortcutKeysRejectInvalidValues) {
+  const TempConfig file;
+  ConfigStore& store = umbriel::configStore();
+  store.setRootPath(file.path(), true);
+
+  file.write("[overview]\nshortcut_keys = \"a\"\n");
+  CHECK(store.reload().success);
+  CHECK_EQ(store.config().overview.shortcutKeys, std::string{"1234567890"});
+  CHECK(containsDiagnostic(store, "expected at least 2 characters"));
+
+  file.write("[overview]\nshortcut_keys = \"aA\"\n");
+  CHECK(store.reload().success);
+  CHECK_EQ(store.config().overview.shortcutKeys, std::string{"1234567890"});
+  CHECK(containsDiagnostic(store, "duplicate key"));
+
+  file.write("[overview]\nshortcut_keys = \"a b\"\n");
+  CHECK(store.reload().success);
+  CHECK_EQ(store.config().overview.shortcutKeys, std::string{"1234567890"});
+  CHECK(containsDiagnostic(store, "invalid character 0x20"));
+
+  file.write("[overview]\nshortcut_keys = 12\n");
+  CHECK(store.reload().success);
+  CHECK_EQ(store.config().overview.shortcutKeys, std::string{"1234567890"});
+  CHECK(containsDiagnostic(store, "expected string"));
+}
+
+UMBRIEL_TEST(overviewBadgeColorRejectsInvalidValues) {
+  const TempConfig file;
+  ConfigStore& store = umbriel::configStore();
+  store.setRootPath(file.path(), true);
+
+  file.write("[overview]\nbadge_color = \"not-a-color\"\n");
+  CHECK(store.reload().success);
+  CHECK(!store.config().overview.badgeColor.has_value());
+  CHECK(containsDiagnostic(store, "overview.badge_color (invalid color"));
+}
+
 UMBRIEL_TEST(cornerRadiusClampsToItsRange) {
   const TempConfig file;
   ConfigStore& store = umbriel::configStore();
@@ -368,6 +551,23 @@ UMBRIEL_TEST(middleClickPasteLoadsAndDefaultsEnabled) {
   file.write("[input]\n");
   CHECK(store.reload().success);
   CHECK(store.config().input.middleClickPaste);
+}
+
+UMBRIEL_TEST(outputNamesDifferingOnlyByCaseAreRejectedAsDuplicates) {
+  const TempConfig file;
+  file.write(R"(
+[output.DP-1]
+scale = 1.5
+
+[output.dp-1]
+scale = 2.0
+)");
+
+  ConfigStore& store = umbriel::configStore();
+  store.setRootPath(file.path(), true);
+  CHECK(store.reload().success);
+  CHECK_EQ(store.config().outputs.size(), size_t{1});
+  CHECK(containsDiagnostic(store, "duplicate output section"));
 }
 
 UMBRIEL_TEST(outputVrrPolicyLoadsAndDefaultsDisabled) {
@@ -506,6 +706,80 @@ UMBRIEL_TEST(windowOutputPoliciesLoadAndRejectInvalidValues) {
   CHECK(containsDiagnostic(store, "ignoring window_rule.hdr"));
 }
 
+UMBRIEL_TEST(windowContentTypeMatcherLoadsFixedVocabulary) {
+  const TempConfig file;
+  ConfigStore& store = umbriel::configStore();
+  store.setRootPath(file.path(), true);
+
+  const auto checkValue = [&](const std::string& value, ContentType expected) {
+    file.write("[[window_rule]]\nmatch.content_type = \"" + value + "\"\nopacity = 0.9\n");
+    CHECK(store.reload().success);
+    CHECK_EQ(store.config().windowRules.size(), size_t{1});
+    CHECK(store.config().windowRules[0].matchContentType == expected);
+    CHECK(!containsDiagnostic(store, "unknown key window_rule.match.content_type"));
+  };
+  checkValue("none", ContentType::None);
+  checkValue("photo", ContentType::Photo);
+  checkValue("video", ContentType::Video);
+  checkValue("game", ContentType::Game);
+
+  file.write("[[window_rule]]\nopacity = 0.9\n");
+  CHECK(store.reload().success);
+  CHECK_EQ(store.config().windowRules.size(), size_t{1});
+  CHECK(!store.config().windowRules[0].matchContentType);
+
+  file.write("[[window_rule]]\nmatch.content_type = 42\nopacity = 0.5\n");
+  CHECK(store.reload().success);
+  CHECK(store.config().windowRules.empty());
+  CHECK(containsDiagnostic(store, "ignoring window_rule.match.content_type (expected none|photo|video|game)"));
+  CHECK(!containsDiagnostic(store, "unknown key window_rule.opacity"));
+
+  file.write("[[window_rule]]\nmatch.content_type = \"stream\"\nmatch.is_focused = true\nopacity = 0.5\n");
+  CHECK(store.reload().success);
+  CHECK(store.config().windowRules.empty());
+  CHECK(containsDiagnostic(store, "ignoring window_rule.match.content_type (expected none|photo|video|game)"));
+  CHECK(!containsDiagnostic(store, "unknown key window_rule.match.is_focused"));
+  CHECK(!containsDiagnostic(store, "unknown key window_rule.opacity"));
+
+  file.write("[[window_rule]]\nmatch.content_type = \"Game\"\nopacity = 0.5\n");
+  CHECK(store.reload().success);
+  CHECK(store.config().windowRules.empty());
+  CHECK(containsDiagnostic(store, "ignoring window_rule.match.content_type (expected none|photo|video|game)"));
+}
+
+UMBRIEL_TEST(windowXdgTagMatcherLoadsRegexAndRejectsInvalidValues) {
+  const TempConfig file;
+  ConfigStore& store = umbriel::configStore();
+  store.setRootPath(file.path(), true);
+
+  file.write("[[window_rule]]\nmatch.xdg_tag = \"^(game-launcher|game-running)$\"\nopacity = 0.9\n");
+  CHECK(store.reload().success);
+  CHECK_EQ(store.config().windowRules.size(), size_t{1});
+  CHECK_EQ(store.config().windowRules[0].xdgTagPattern, std::string("^(game-launcher|game-running)$"));
+  CHECK(std::regex_search("game-launcher", store.config().windowRules[0].xdgTagRegex));
+  CHECK(std::regex_search("game-running", store.config().windowRules[0].xdgTagRegex));
+  CHECK(!std::regex_search("game-settings", store.config().windowRules[0].xdgTagRegex));
+  CHECK(!containsDiagnostic(store, "unknown key window_rule.match.xdg_tag"));
+
+  file.write("[[window_rule]]\nopacity = 0.9\n");
+  CHECK(store.reload().success);
+  CHECK_EQ(store.config().windowRules.size(), size_t{1});
+  CHECK(store.config().windowRules[0].xdgTagPattern.empty());
+
+  file.write("[[window_rule]]\nmatch.xdg_tag = 42\nmatch.is_focused = true\nopacity = 0.5\n");
+  CHECK(store.reload().success);
+  CHECK(store.config().windowRules.empty());
+  CHECK(containsDiagnostic(store, "ignoring window_rule.match.xdg_tag (expected string)"));
+  CHECK(!containsDiagnostic(store, "unknown key window_rule.match.is_focused"));
+  CHECK(!containsDiagnostic(store, "unknown key window_rule.opacity"));
+
+  file.write("[[window_rule]]\nmatch.xdg_tag = \"[\"\nopacity = 0.5\n");
+  CHECK(store.reload().success);
+  CHECK(store.config().windowRules.empty());
+  CHECK(containsDiagnostic(store, "invalid regex in window_rule.match.xdg_tag"));
+  CHECK(!containsDiagnostic(store, "unknown key window_rule.opacity"));
+}
+
 UMBRIEL_TEST(windowTearingOverrideLoadsAsAnOptionalBoolean) {
   const TempConfig file;
   ConfigStore& store = umbriel::configStore();
@@ -528,6 +802,35 @@ UMBRIEL_TEST(windowTearingOverrideLoadsAsAnOptionalBoolean) {
   CHECK(store.reload().success);
   CHECK(!store.config().windowRules[0].allowTearing);
   CHECK(containsDiagnostic(store, "ignoring window_rule.tearing (expected boolean)"));
+}
+
+UMBRIEL_TEST(windowRuleFractionSizingLoadsAndClamps) {
+  const TempConfig file;
+  ConfigStore& store = umbriel::configStore();
+  store.setRootPath(file.path(), true);
+
+  file.write(
+      "[[window_rule]]\nmatch.app_id = \"^utility$\"\ndefault_floating = true\ndefault_width = 0.5\ndefault_height = "
+      "0.6\n"
+  );
+  CHECK(store.reload().success);
+  CHECK_EQ(store.config().windowRules.size(), size_t{1});
+  CHECK(store.config().windowRules[0].defaultWidth && *store.config().windowRules[0].defaultWidth == 0.5);
+  CHECK(store.config().windowRules[0].defaultHeight && *store.config().windowRules[0].defaultHeight == 0.6);
+
+  // Out-of-range fractions clamp into [0.1, 1.0] with a diagnostic, like default_width.
+  file.write("[[window_rule]]\ndefault_width = 3.0\ndefault_height = 0.01\n");
+  CHECK(store.reload().success);
+  CHECK(store.config().windowRules[0].defaultWidth && *store.config().windowRules[0].defaultWidth == 1.0);
+  CHECK(store.config().windowRules[0].defaultHeight && *store.config().windowRules[0].defaultHeight == 0.1);
+  CHECK(containsDiagnostic(store, "window_rule.default_width = 3 out of range, clamped to 1"));
+  CHECK(containsDiagnostic(store, "window_rule.default_height = 0.01 out of range, clamped to 0.1"));
+
+  // Non-numeric values are ignored with a diagnostic.
+  file.write("[[window_rule]]\ndefault_height = \"half\"\n");
+  CHECK(store.reload().success);
+  CHECK(!store.config().windowRules[0].defaultHeight);
+  CHECK(containsDiagnostic(store, "ignoring window_rule.default_height (expected number 0.1-1.0)"));
 }
 
 UMBRIEL_TEST(outputEnabledFlagParsesAndDefaultsTrue) {
@@ -640,6 +943,8 @@ focus_on_activate = true
 match.app_id = "^game$"
 default_focused = false
 default_pinned = true
+default_scrolling_column = "browser-stack"
+default_scrolling_column_order = 20
 focus_on_activate = false
 default_position = { x = 32, y = 48, anchor = "bottom_left" }
 
@@ -659,6 +964,8 @@ default_position = { x = 0, y = 0 }
   CHECK(!*store.config().windowRules[0].defaultFocused);
   CHECK(store.config().windowRules[0].defaultPinned.has_value());
   CHECK(*store.config().windowRules[0].defaultPinned);
+  CHECK(store.config().windowRules[0].defaultScrollingColumn == "browser-stack");
+  CHECK(store.config().windowRules[0].defaultScrollingColumnOrder == 20);
   CHECK(store.config().windowRules[0].focusOnActivate.has_value());
   CHECK(!*store.config().windowRules[0].focusOnActivate);
   CHECK(store.config().windowRules[0].defaultPosition.has_value());
@@ -695,6 +1002,9 @@ tap = true
 natural_scroll = true
 accel_profile = "adaptive"
 sensitivity = 0.1
+scroll_factor = 1.5
+disable_while_typing = true
+disable_on_external_mouse = true
 
 [input.mouse]
 accel_profile = "custom 0.2 0.0 0.5 1.0 2.0"
@@ -713,6 +1023,7 @@ tap = false
 natural_scroll = false
 accel_profile = "flat"
 sensitivity = -0.5
+disable_while_typing = false
 
 [[input.device]]
 name = "Acme Gaming Mouse"
@@ -736,6 +1047,9 @@ sensitivity = -0.5
     CHECK(input.touchpad.accelProfile->kind == umbriel::AccelProfile::Kind::Adaptive);
   }
   CHECK(input.touchpad.sensitivity == std::optional<double>(0.1));
+  CHECK(input.touchpad.scrollFactor == std::optional<double>(1.5));
+  CHECK(input.touchpad.disableWhileTyping == std::optional<bool>(true));
+  CHECK(input.touchpad.disableOnExternalMouse == std::optional<bool>(true));
   CHECK_EQ(input.devices.size(), size_t{3});
 
   const auto* keyboard = input.findDevice("Acme Split Keyboard");
@@ -757,6 +1071,7 @@ sensitivity = -0.5
       CHECK(touchpad->accelProfile->kind == umbriel::AccelProfile::Kind::Flat);
     }
     CHECK(touchpad->sensitivity == std::optional<double>(-0.5));
+    CHECK(touchpad->disableWhileTyping == std::optional<bool>(false));
   }
 
   const auto* mouse = input.findDevice("Acme Gaming Mouse");
@@ -783,9 +1098,29 @@ UMBRIEL_TEST(touchpadAccelerationDefaultsToUnset) {
   CHECK(!defaults.input.touchpad.sensitivity.has_value());
 }
 
+UMBRIEL_TEST(touchpadScrollFactorDefaultsToUnset) {
+  const umbriel::Config defaults;
+  CHECK(!defaults.input.touchpad.scrollFactor.has_value());
+}
+
+UMBRIEL_TEST(touchpadDisableWhileTypingDefaultsToUnset) {
+  const umbriel::Config defaults;
+  CHECK(!defaults.input.touchpad.disableWhileTyping.has_value());
+}
+
+UMBRIEL_TEST(touchpadDisableOnExternalMouseDefaultsToUnset) {
+  const umbriel::Config defaults;
+  CHECK(!defaults.input.touchpad.disableOnExternalMouse.has_value());
+}
+
 UMBRIEL_TEST(touchpadTapDefaultsToEnabled) {
   const umbriel::Config defaults;
   CHECK(defaults.input.touchpad.tap == std::optional<bool>(true));
+}
+
+UMBRIEL_TEST(cursorFollowsFocusDefaultsToDisabled) {
+  const umbriel::Config defaults;
+  CHECK(!defaults.input.cursor.followsFocus);
 }
 
 UMBRIEL_TEST(hardwareCursorCanBeDisabled) {
@@ -793,6 +1128,7 @@ UMBRIEL_TEST(hardwareCursorCanBeDisabled) {
   file.write(R"(
 [input.cursor]
 hardware_cursor = false
+follows_focus = true
 hide_when_typing = true
 )");
 
@@ -802,8 +1138,10 @@ hide_when_typing = true
 
   CHECK(result.success);
   CHECK(!store.config().input.cursor.hardwareCursor);
+  CHECK(store.config().input.cursor.followsFocus);
   CHECK(store.config().input.cursor.hideWhenTyping);
   CHECK(!containsDiagnostic(store, "unknown key input.cursor.hardware_cursor"));
+  CHECK(!containsDiagnostic(store, "unknown key input.cursor.follows_focus"));
   CHECK(!containsDiagnostic(store, "unknown key input.cursor.hide_when_typing"));
 }
 
@@ -874,6 +1212,22 @@ options = "grp:win_space_toggle"
     CHECK(device->layout == std::optional<std::string>("us,fr"));
     CHECK(device->options == std::optional<std::string>("grp:win_space_toggle"));
   }
+}
+
+UMBRIEL_TEST(keyboardTrackLayoutLoadsAndRejectsUnknownValues) {
+  const TempConfig file;
+  file.write("[input.keyboard]\ntrack_layout = \"window\"\n");
+
+  ConfigStore& store = umbriel::configStore();
+  store.setRootPath(file.path(), true);
+  CHECK(store.reload().success);
+  CHECK_EQ(store.config().input.keyboard.trackLayout, TrackLayout::Window);
+  CHECK(!containsDiagnostic(store, "unknown key input.keyboard.track_layout"));
+
+  file.write("[input.keyboard]\ntrack_layout = \"surface\"\n");
+  CHECK(store.reload().success);
+  CHECK_EQ(store.config().input.keyboard.trackLayout, TrackLayout::Global);
+  CHECK(containsDiagnostic(store, "expected global|window"));
 }
 
 UMBRIEL_TEST(tabletConfigLoads) {
@@ -1019,6 +1373,165 @@ enabled = true
   CHECK(containsDiagnostic(store, "unknown key appearance.animations"));
   CHECK(containsDiagnostic(store, "unknown key animations"));
   CHECK(containsDiagnostic(store, "unknown key animation.fade"));
+}
+
+UMBRIEL_TEST(environmentRequiresStringValuesAndPortableNames) {
+  const TempConfig file;
+  file.write(R"(
+[environment]
+DXVK_HDR = "1"
+_PRIVATE = "kept"
+"9INVALID" = "ignored"
+"HAS-HYPHEN" = "ignored"
+NOT_A_STRING = 1
+WAYLAND_DISPLAY = "wrong"
+)");
+
+  ConfigStore& store = umbriel::configStore();
+  store.setRootPath(file.path(), true);
+  const umbriel::ConfigReloadResult result = store.reload();
+
+  CHECK(result.success);
+  CHECK_EQ(store.config().environment.variables.size(), size_t{2});
+  CHECK(
+      std::ranges::find(store.config().environment.variables, std::pair{std::string{"DXVK_HDR"}, std::string{"1"}})
+      != store.config().environment.variables.end()
+  );
+  CHECK(
+      std::ranges::find(store.config().environment.variables, std::pair{std::string{"_PRIVATE"}, std::string{"kept"}})
+      != store.config().environment.variables.end()
+  );
+  CHECK(containsDiagnostic(store, R"(ignoring environment key "9INVALID" (expected [A-Za-z_][A-Za-z0-9_]*))"));
+  CHECK(containsDiagnostic(store, R"(ignoring environment key "HAS-HYPHEN" (expected [A-Za-z_][A-Za-z0-9_]*))"));
+  CHECK(containsDiagnostic(store, "ignoring environment.NOT_A_STRING (expected string)"));
+  CHECK(containsDiagnostic(store, "ignoring environment.WAYLAND_DISPLAY (reserved by Umbriel)"));
+  CHECK(!containsDiagnostic(store, "unknown key environment.DXVK_HDR"));
+  CHECK(!containsDiagnostic(store, "unknown key environment._PRIVATE"));
+}
+
+UMBRIEL_TEST(eventsLoadCanonicalLidCommands) {
+  const TempConfig file;
+  file.write(R"(
+[events]
+lid_close = "systemctl suspend"
+lid_open = "notify-send awake"
+)");
+
+  ConfigStore& store = umbriel::configStore();
+  store.setRootPath(file.path(), true);
+  const umbriel::ConfigReloadResult result = store.reload();
+
+  CHECK(result.success);
+  CHECK_EQ(store.config().events.lidClose, std::string{"systemctl suspend"});
+  CHECK_EQ(store.config().events.lidOpen, std::string{"notify-send awake"});
+  CHECK(store.diagnostics().empty());
+}
+
+UMBRIEL_TEST(parsesScratchpadSlotRules) {
+  TempConfig file;
+  file.write(R"(
+[[scratchpad]]
+name = "special:music"
+scale = 0.65
+direction = "right"
+duration_ms = 350
+dim = 0.5
+blur = true
+layout = "master"
+gap = 16
+on_empty = "spotify"
+
+[[scratchpad]]
+name = "notes"
+on_created_empty = "notes-app"
+suspend_hidden = false
+)");
+
+  ConfigStore& store = umbriel::configStore();
+  store.setRootPath(file.path(), true);
+  const umbriel::ConfigReloadResult result = store.reload();
+  const auto& slots = store.config().scratchpadRules;
+
+  CHECK(result.success);
+  CHECK_EQ(slots.size(), size_t{2});
+  // "special:" is stripped so special-workspace-style names address the same slot.
+  CHECK_EQ(slots[0].name, std::string{"music"});
+  CHECK_EQ(slots[0].scale.value_or(0.0), 0.65);
+  CHECK_EQ(slots[0].direction.value_or(""), std::string{"right"});
+  CHECK_EQ(slots[0].durationMs.value_or(0), 350);
+  CHECK_EQ(slots[0].dim.value_or(0.0), 0.5);
+  CHECK(slots[0].blur.value_or(false));
+  CHECK(slots[0].layout.has_value() && *slots[0].layout == umbriel::LayoutMode::Master);
+  CHECK_EQ(slots[0].gap.value_or(0), 16);
+  CHECK_EQ(slots[0].onEmpty.value_or(""), std::string{"spotify"});
+
+  CHECK_EQ(slots[1].name, std::string{"notes"});
+  CHECK_EQ(slots[1].onEmpty.value_or(""), std::string{"notes-app"});
+  CHECK(!slots[1].suspendHidden.value_or(true));
+  CHECK(!slots[1].layout.has_value());
+}
+
+UMBRIEL_TEST(parsesScratchpadWindowRules) {
+  TempConfig file;
+  file.write(R"(
+[[window_rule]]
+match.app_id = "spotify"
+default_scratchpad = "music"
+
+[[window_rule]]
+match.title = ".*term.*"
+scratchpad = "special:terminal"
+)");
+
+  ConfigStore& store = umbriel::configStore();
+  store.setRootPath(file.path(), true);
+  const umbriel::ConfigReloadResult result = store.reload();
+  const auto& rules = store.config().windowRules;
+
+  CHECK(result.success);
+  CHECK_EQ(rules.size(), size_t{2});
+  CHECK(rules[0].defaultScratchpad.has_value());
+  CHECK_EQ(*rules[0].defaultScratchpad, std::string{"music"});
+  CHECK(rules[1].defaultScratchpad.has_value());
+  CHECK_EQ(*rules[1].defaultScratchpad, std::string{"terminal"});
+}
+
+UMBRIEL_TEST(rejectsBadScratchpadSlotValues) {
+  TempConfig file;
+  file.write(R"(
+[animation.scratchpad]
+direction = "sideways"
+
+[[scratchpad]]
+name = "ok"
+direction = "diagonal"
+scale = 4.0
+duration_ms = 99999
+gap = "wide"
+layout = "tiling"
+
+[[scratchpad]]
+scale = 0.5
+)");
+
+  ConfigStore& store = umbriel::configStore();
+  store.setRootPath(file.path(), true);
+  const umbriel::ConfigReloadResult result = store.reload();
+
+  CHECK(result.success);
+  CHECK(containsDiagnostic(store, "unknown animation.scratchpad.direction"));
+  CHECK(containsDiagnostic(store, "unknown scratchpad.direction"));
+  CHECK(containsDiagnostic(store, "scratchpad.scale = 4"));
+  CHECK(containsDiagnostic(store, "scratchpad.duration_ms = 99999"));
+  CHECK(containsDiagnostic(store, "ignoring scratchpad.gap"));
+  CHECK(containsDiagnostic(store, "unknown scratchpad.layout"));
+  // The entry without a name is dropped, so only the named one survives.
+  CHECK(containsDiagnostic(store, "missing 'name' string"));
+  CHECK_EQ(store.config().scratchpadRules.size(), size_t{1});
+  // Rejected values leave the slot on the global default.
+  CHECK(!store.config().scratchpadRules[0].direction.has_value());
+  CHECK(!store.config().scratchpadRules[0].scale.has_value());
+  CHECK_EQ(store.config().animation.scratchpad.direction, std::string{"top"});
 }
 
 UMBRIEL_TEST(packagedAnimationDefaultsMatchCompiledDefaults) {

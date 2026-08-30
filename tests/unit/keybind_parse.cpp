@@ -148,6 +148,12 @@ UMBRIEL_TEST(parsesMouseButtons) {
   CHECK_EQ(chord("Mod+MouseForward").mouseButton, uint32_t{BTN_EXTRA});
 }
 
+UMBRIEL_TEST(parsesLayoutScrollDragAction) {
+  Keybind bind;
+  CHECK(umbriel::parseAction("layout-scroll-drag", bind));
+  CHECK(bind.action == KeybindAction::LayoutScrollDrag);
+}
+
 UMBRIEL_TEST(rejectsBareWheelAndMouseBinds) {
   // An unmodified wheel or button bind would swallow all client input.
   Keybind bind;
@@ -226,6 +232,7 @@ UMBRIEL_TEST(submapNoLongerSharesStorageWithSpawn) {
 
   CHECK(!parseAction("submap", bind));
   CHECK(!parseAction("submap:", bind));
+  CHECK(!parseAction("submap:invalid]name", bind));
 
   CHECK(parseAction("spawn:resize", bind));
   CHECK(umbriel::payloadIf<umbriel::SubmapArg>(bind) == nullptr);
@@ -299,6 +306,27 @@ UMBRIEL_TEST(rejectsInvalidWidthDeltas) {
   CHECK(!parseAction("window-modify-width:nan", bind));
 }
 
+UMBRIEL_TEST(parsesHeightActions) {
+  Keybind bind;
+  CHECK(parseAction("window-set-height:0.5", bind));
+  CHECK(bind.action == KeybindAction::WindowSetHeight);
+  const auto* height = umbriel::payloadIf<umbriel::WidthArg>(bind);
+  CHECK(height != nullptr);
+  CHECK(height != nullptr && std::fabs(height->fraction - 0.5) < 1e-9);
+
+  CHECK(parseAction("window-modify-height:-0.2", bind));
+  CHECK(bind.action == KeybindAction::WindowModifyHeight);
+  height = umbriel::payloadIf<umbriel::WidthArg>(bind);
+  CHECK(height != nullptr && std::fabs(height->fraction + 0.2) < 1e-9);
+
+  CHECK(parseAction("window-modify-height:+0.1", bind));
+  height = umbriel::payloadIf<umbriel::WidthArg>(bind);
+  CHECK(height != nullptr && std::fabs(height->fraction - 0.1) < 1e-9);
+
+  CHECK(!parseAction("window-set-height:0.05", bind));
+  CHECK(!parseAction("window-modify-height:0", bind));
+}
+
 UMBRIEL_TEST(parsesLayoutModeActions) {
   Keybind bind;
   CHECK(parseAction("workspace-set-layout:scrolling", bind));
@@ -369,6 +397,30 @@ UMBRIEL_TEST(parsesArgumentFreeNewActions) {
   CHECK(parseAction("column-move-to-last", bind));
   CHECK(bind.action == KeybindAction::ColumnMoveToLast);
 
+  CHECK(parseAction("window-focus-previous", bind));
+  CHECK(bind.action == KeybindAction::WindowFocusPrevious);
+  CHECK(parseAction("window-swap-next", bind));
+  CHECK(bind.action == KeybindAction::WindowSwapNext);
+  CHECK(parseAction("window-swap-previous", bind));
+  CHECK(bind.action == KeybindAction::WindowSwapPrevious);
+  CHECK(parseAction("master-count-increase", bind));
+  CHECK(bind.action == KeybindAction::MasterCountIncrease);
+  CHECK(parseAction("master-count-decrease", bind));
+  CHECK(bind.action == KeybindAction::MasterCountDecrease);
+
+  CHECK(parseAction("window-focus-last", bind));
+  CHECK(bind.action == KeybindAction::WindowFocusLast);
+  CHECK(parseAction("window-consume-left", bind));
+  CHECK(bind.action == KeybindAction::WindowConsumeLeft);
+  CHECK(parseAction("window-consume-or-expel-left", bind));
+  CHECK(bind.action == KeybindAction::WindowConsumeOrExpelLeft);
+  CHECK(parseAction("window-consume-right", bind));
+  CHECK(bind.action == KeybindAction::WindowConsumeRight);
+  CHECK(parseAction("window-consume-or-expel-right", bind));
+  CHECK(bind.action == KeybindAction::WindowConsumeOrExpelRight);
+  CHECK(!parseAction("window-consume-or-expel", bind));
+  CHECK(!parseAction("window-expel-right", bind));
+
   // Argument-free actions reject arguments.
   CHECK(!parseAction("workspace-next:1", bind));
   CHECK(!parseAction("window-move-to-workspace-next:1", bind));
@@ -378,6 +430,11 @@ UMBRIEL_TEST(parsesArgumentFreeNewActions) {
   CHECK(!parseAction("output-focus-left:DP-1", bind));
   CHECK(!parseAction("window-center:x", bind));
   CHECK(!parseAction("window-toggle-maximize-to-edges:x", bind));
+  CHECK(!parseAction("window-focus-last:x", bind));
+  CHECK(!parseAction("window-consume-left:x", bind));
+  CHECK(!parseAction("window-consume-or-expel-left:x", bind));
+  CHECK(!parseAction("window-consume-right:x", bind));
+  CHECK(!parseAction("window-consume-or-expel-right:x", bind));
 }
 
 UMBRIEL_TEST(parsesWorkspaceSelectors) {
@@ -425,24 +482,6 @@ UMBRIEL_TEST(parsesOptionalOutputActions) {
   };
 
   Keybind bind;
-  CHECK(parseAction("scratchpad-toggle", bind));
-  CHECK(bind.action == KeybindAction::ScratchpadToggle);
-  // The alternative is present even with no output, so the payload still says
-  // which action shape it belongs to.
-  CHECK(umbriel::payloadIf<umbriel::OutputArg>(bind) != nullptr);
-  CHECK(outputOf(bind).empty());
-
-  CHECK(parseAction("scratchpad-toggle:DP-2", bind));
-  CHECK_EQ(outputOf(bind), std::string{"DP-2"});
-
-  CHECK(parseAction("window-move-to-scratchpad", bind));
-  CHECK(bind.action == KeybindAction::WindowMoveToScratchpad);
-  CHECK(parseAction("window-restore-from-scratchpad:eDP-1", bind));
-  CHECK_EQ(outputOf(bind), std::string{"eDP-1"});
-  CHECK(parseAction("window-toggle-scratchpad", bind));
-  CHECK(bind.action == KeybindAction::WindowToggleScratchpad);
-  CHECK(parseAction("scratchpad-focus-next", bind));
-
   CHECK(parseAction("dpms-off", bind));
   CHECK(bind.action == KeybindAction::DpmsOff);
   CHECK(outputOf(bind).empty());
@@ -452,6 +491,40 @@ UMBRIEL_TEST(parsesOptionalOutputActions) {
   CHECK(bind.action == KeybindAction::DpmsOn);
   CHECK(parseAction("dpms-on:eDP-1", bind));
   CHECK_EQ(outputOf(bind), std::string{"eDP-1"});
+}
+
+UMBRIEL_TEST(parsesOptionalScratchpadActions) {
+  const auto scratchpadOf = [](const Keybind& bind) {
+    const auto* arg = umbriel::payloadIf<umbriel::ScratchpadArg>(bind);
+    return arg != nullptr ? *arg : umbriel::ScratchpadArg{};
+  };
+
+  Keybind bind;
+  CHECK(parseAction("scratchpad-toggle", bind));
+  CHECK(bind.action == KeybindAction::ScratchpadToggle);
+  CHECK(umbriel::payloadIf<umbriel::ScratchpadArg>(bind) != nullptr);
+  CHECK(scratchpadOf(bind).name.empty());
+  CHECK(scratchpadOf(bind).output.empty());
+
+  CHECK(parseAction("scratchpad-toggle:music", bind));
+  CHECK_EQ(scratchpadOf(bind).name, std::string{"music"});
+
+  CHECK(parseAction("scratchpad-toggle:DP-2", bind));
+  CHECK_EQ(scratchpadOf(bind).name, std::string{"DP-2"});
+
+  CHECK(parseAction("scratchpad-toggle:term/DP-2", bind));
+  CHECK_EQ(scratchpadOf(bind).name, std::string{"term"});
+  CHECK_EQ(scratchpadOf(bind).output, std::string{"DP-2"});
+
+  CHECK(parseAction("window-move-to-scratchpad", bind));
+  CHECK(bind.action == KeybindAction::WindowMoveToScratchpad);
+  CHECK(parseAction("window-move-to-scratchpad-silent:music", bind));
+  CHECK(bind.action == KeybindAction::WindowMoveToScratchpadSilent);
+  CHECK_EQ(scratchpadOf(bind).name, std::string{"music"});
+  CHECK(parseAction("window-restore-from-scratchpad:eDP-1", bind));
+  CHECK(parseAction("window-toggle-scratchpad", bind));
+  CHECK(bind.action == KeybindAction::WindowToggleScratchpad);
+  CHECK(parseAction("scratchpad-focus-next", bind));
 }
 
 UMBRIEL_TEST(parsesWindowIdActions) {
@@ -478,6 +551,7 @@ UMBRIEL_TEST(payloadAlternativeMatchesTheDeclaredArgKind) {
     switch (spec.argKind) {
     case ActionArgKind::None:
     case ActionArgKind::OptionalOutput:
+    case ActionArgKind::OptionalScratchpad:
     case ActionArgKind::OptionalWindowId:
     case ActionArgKind::SkipConfirmation:
       break;
@@ -525,6 +599,9 @@ UMBRIEL_TEST(payloadAlternativeMatchesTheDeclaredArgKind) {
     case ActionArgKind::OptionalOutput:
       CHECK(umbriel::payloadIf<umbriel::OutputArg>(bind) != nullptr);
       break;
+    case ActionArgKind::OptionalScratchpad:
+      CHECK(umbriel::payloadIf<umbriel::ScratchpadArg>(bind) != nullptr);
+      break;
     case ActionArgKind::WindowId:
     case ActionArgKind::OptionalWindowId:
       CHECK(umbriel::payloadIf<umbriel::WindowIdArg>(bind) != nullptr);
@@ -559,6 +636,7 @@ UMBRIEL_TEST(everyActionSpecRoundTripsThroughParseAction) {
     switch (spec.argKind) {
     case ActionArgKind::None:
     case ActionArgKind::OptionalOutput:
+    case ActionArgKind::OptionalScratchpad:
     case ActionArgKind::OptionalWindowId:
     case ActionArgKind::SkipConfirmation:
       break;
@@ -596,6 +674,26 @@ UMBRIEL_TEST(actionSpecNamesAreUniqueAndSorted) {
   for (size_t i = 1; i < specs.size(); ++i) {
     CHECK(specs[i - 1].name != specs[i].name);
   }
+}
+
+UMBRIEL_TEST(everyActionHasASpec) {
+  // actions.cpp guards the handler table with a consteval everyActionHasHandler.
+  // Nothing guarded the name table, so an action could ship with a handler, a
+  // cheatsheet row, and docs while staying unbindable and unreachable over IPC.
+  std::array<bool, static_cast<size_t>(KeybindAction::Count)> named{};
+  for (const auto& spec : umbriel::actionSpecs()) {
+    named[static_cast<size_t>(spec.action)] = true;
+  }
+  // Enumerator 0 is None, which is never bindable. On failure the reported
+  // "got" value is the index of the first action that has no name.
+  size_t firstUnnamed = named.size();
+  for (size_t action = 1; action < named.size(); ++action) {
+    if (!named[action]) {
+      firstUnnamed = action;
+      break;
+    }
+  }
+  CHECK_EQ(firstUnnamed, named.size());
 }
 
 UMBRIEL_TEST(parameterizedSpecsDeclareAParam) {

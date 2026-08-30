@@ -5,9 +5,11 @@
 #include "scene/hint_rect.h"
 #include "scene/surface_blur.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 #include <wayland-server-core.h>
 
@@ -71,6 +73,7 @@ namespace umbriel {
 
     void onViewMapped(View* view);
     void onViewUnmapped(View* view);
+    void onViewPinnedChanged(View* view);
     void onViewWorkspaceChanged(View* view);
     void onWorkspaceActivated(WorkspaceGroup* group);
     void onWorkspaceArranged(Workspace* workspace);
@@ -95,7 +98,7 @@ namespace umbriel {
     // up the real trees are hidden, so there is nothing to slide and switching is a discrete step rather than the
     // animated transition it is outside.
     bool selectRelativeWorkspace(int delta, Output* output);
-    [[nodiscard]] bool dragging() const { return m_dragCard != nullptr; }
+    [[nodiscard]] bool dragging() const { return m_dragCard != nullptr || m_middlePressed; }
 
   private:
     struct Card;
@@ -125,6 +128,19 @@ namespace umbriel {
       SurfaceBlur blur;
       std::vector<std::unique_ptr<CardSurface>> surfaces;
       wlr_box box{}; // content box in layout coordinates
+      wlr_scene_tree* badge = nullptr;
+      wlr_scene_rect* badgeRect = nullptr;
+      wlr_scene_buffer* badgeText = nullptr;
+      int badgeWidth = 0;
+      int badgeHeight = 0;
+      std::array<float, 4> badgeBackground{};
+      std::string shortcut;
+      size_t shortcutMatched = 0;
+    };
+
+    struct ShortcutAssignment {
+      View* view = nullptr;
+      std::string label;
     };
 
     struct OutputState {
@@ -177,6 +193,12 @@ namespace umbriel {
     void applyProgress();
     void layoutOutput(OutputState& state);
     void layoutCard(Card& card, const RowMetrics& metrics, double rowScroll);
+    void assignShortcuts();
+    void renderCardShortcut(Card& card);
+    bool handleShortcutKey(uint32_t keysym);
+    void refreshShortcutMatches();
+    void clearShortcutInput();
+    void updateShortcutAssignments();
 
     void startAnimation(double target, bool closing);
     void finishAnimation();
@@ -189,6 +211,7 @@ namespace umbriel {
     [[nodiscard]] WorkspaceGroup*
     workspaceGapAt(double lx, double ly, OutputState** outState, size_t* outIndex, wlr_box* outHintBox);
     [[nodiscard]] Workspace* preferredWorkspace() const;
+    void clearMiddlePress();
 
     void beginDrag();
     void updateDrag(double lx, double ly);
@@ -212,11 +235,22 @@ namespace umbriel {
     View* m_pendingFocus = nullptr;
     bool m_cardPresentationDirty = false;
     bool m_gestureOpenedHere = false;
+    bool m_shortcutsDirty = true;
+    std::string m_shortcutInput;
+    std::vector<ShortcutAssignment> m_shortcutAssignments;
+    size_t m_shortcutLabelCapacity = 0;
 
     Card* m_pressCard = nullptr;
     Workspace* m_pressWorkspace = nullptr;
     double m_pressX = 0;
     double m_pressY = 0;
+    Card* m_middlePressCard = nullptr;
+    Output* m_middleOutput = nullptr;
+    double m_middlePressX = 0;
+    double m_middlePressY = 0;
+    double m_middleAccumY = 0;
+    bool m_middlePressed = false;
+    bool m_middleDragging = false;
 
     Card* m_dragCard = nullptr;
     double m_dragOffsetX = 0;

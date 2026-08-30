@@ -3,7 +3,9 @@
 #include "config/config.h"
 #include "core/log.h"
 #include "input/cursor.h"
+#include "input/keyboard_layout.h"
 #include "input/seat.h"
+#include "input/shortcut_keysym.h"
 #include "input/text_input.h"
 #include "overview/overview.h"
 #include "scene/cheatsheet.h"
@@ -38,17 +40,6 @@ namespace umbriel {
     wl_signal_add(&m_keyboard->events.key, &m_key);
     m_destroy.notify = onDestroy;
     wl_signal_add(&device->events.destroy, &m_destroy);
-
-    // A virtual keyboard is announced before its client necessarily provides a
-    // keymap. Do not replace a usable keyboard already on the seat with that
-    // incomplete device; its first modifiers or key event selects it below. An
-    // empty seat still has to take it: keyboard focus enter and the
-    // input-method grab keymap both read the seat's current keyboard, so a
-    // session whose only keyboards are virtual would never focus or type.
-    wlr_seat* seat = m_server->seat()->wlr();
-    if (!m_virtual || wlr_seat_get_keyboard(seat) == nullptr) {
-      wlr_seat_set_keyboard(seat, m_keyboard);
-    }
   }
   void Keyboard::applyConfig() {
     cancelRepeat();
@@ -83,9 +74,11 @@ namespace umbriel {
       xkb_context_unref(context);
     }
     wlr_keyboard_set_repeat_info(m_keyboard, repeatRate, repeatDelay);
-    // The name list or keymap changed; resend the current state so consumers
-    // observe the reload even when the effective group did not move.
-    notifyLayoutIfChanged();
+    // A new keymap starts in group zero. Record it without treating initial
+    // setup or a config reload as a user-driven layout transition.
+    m_lastNotifiedLayout = m_keyboard->xkb_state == nullptr
+        ? XKB_LAYOUT_INVALID
+        : xkb_state_serialize_layout(m_keyboard->xkb_state, XKB_STATE_LAYOUT_EFFECTIVE);
   }
 
   bool Keyboard::cycleLayout() {
@@ -113,6 +106,55 @@ namespace umbriel {
     return effective == next;
   }
 
+  void Keyboard::syncLayoutFrom(const Keyboard& source) {
+    if (m_virtual
+        || m_keyboard->keymap == nullptr
+        || m_keyboard->xkb_state == nullptr
+        || source.m_virtual
+        || source.m_keyboard->keymap == nullptr
+        || source.m_keyboard->xkb_state == nullptr) {
+      return;
+    }
+    const xkb_layout_index_t sourceGroup =
+        xkb_state_serialize_layout(source.m_keyboard->xkb_state, XKB_STATE_LAYOUT_EFFECTIVE);
+    const std::optional<xkb_layout_index_t> targetGroup =
+        matchingLayoutGroup(m_keyboard->keymap, source.m_keyboard->keymap, sourceGroup);
+    if (targetGroup.has_value()) {
+      setLayout(*targetGroup);
+    }
+  }
+
+  bool Keyboard::setLayoutByName(std::string_view name) {
+    if (m_virtual || m_keyboard->keymap == nullptr || m_keyboard->xkb_state == nullptr) {
+      return false;
+    }
+    const std::optional<xkb_layout_index_t> group = layoutGroupNamed(m_keyboard->keymap, name);
+    if (!group.has_value()) {
+      return false;
+    }
+    setLayout(*group);
+    return true;
+  }
+
+  void Keyboard::setLayout(xkb_layout_index_t group) {
+    if (m_virtual
+        || m_keyboard->keymap == nullptr
+        || m_keyboard->xkb_state == nullptr
+        || group >= xkb_keymap_num_layouts(m_keyboard->keymap)
+        || xkb_state_serialize_layout(m_keyboard->xkb_state, XKB_STATE_LAYOUT_EFFECTIVE) == group) {
+      return;
+    }
+    // wlroots emits the modifiers signal synchronously. Keep this synthetic
+    // update away from the seat and input-method paths, which must continue to
+    // describe the keyboard that produced the real input event.
+    m_syncingLayout = true;
+    wlr_keyboard_notify_modifiers(
+        m_keyboard, m_keyboard->modifiers.depressed, m_keyboard->modifiers.latched, m_keyboard->modifiers.locked, group
+    );
+    m_syncingLayout = false;
+    m_lastNotifiedLayout = xkb_state_serialize_layout(m_keyboard->xkb_state, XKB_STATE_LAYOUT_EFFECTIVE);
+  }
+
   void Keyboard::notifyLayoutIfChanged() {
     if (m_virtual || m_keyboard->keymap == nullptr || m_keyboard->xkb_state == nullptr) {
       return;
@@ -122,7 +164,14 @@ namespace umbriel {
       return;
     }
     m_lastNotifiedLayout = effective;
-    m_server->notifyKeyboardLayoutIpc();
+    m_server->keyboardLayoutChanged(this);
+  }
+
+  wlr_input_method_keyboard_grab_v2* Keyboard::activeInputMethodGrab() const {
+    if (m_server->sessionLocked()) {
+      return nullptr;
+    }
+    return m_server->inputMethodRelay()->grabForKeyboard(m_keyboard);
   }
 
   Keyboard::~Keyboard() {
@@ -156,10 +205,25 @@ namespace umbriel {
   }
 
   void Keyboard::handleModifiers() {
+    wlr_seat* seat = m_server->seat()->wlr();
+    if (m_syncingLayout) {
+      // A config reload can remap the seat's current keyboard to a differently
+      // ordered matching group. Forward that current state, but never select or
+      // forward a sibling keyboard merely because it was synchronized.
+      if (wlr_seat_get_keyboard(seat) == m_keyboard) {
+        wlr_input_method_keyboard_grab_v2* grab = activeInputMethodGrab();
+        if (grab != nullptr) {
+          wlr_input_method_keyboard_grab_v2_set_keyboard(grab, m_keyboard);
+          wlr_input_method_keyboard_grab_v2_send_modifiers(grab, &m_keyboard->modifiers);
+        } else {
+          wlr_seat_keyboard_notify_modifiers(seat, &m_keyboard->modifiers);
+        }
+      }
+      return;
+    }
     cancelRepeat();
     m_server->notifyIdleActivity();
-    wlr_seat* seat = m_server->seat()->wlr();
-    wlr_input_method_keyboard_grab_v2* grab = m_server->inputMethodRelay()->grabForKeyboard(m_keyboard);
+    wlr_input_method_keyboard_grab_v2* grab = activeInputMethodGrab();
     if (grab != nullptr) {
       wlr_input_method_keyboard_grab_v2_set_keyboard(grab, m_keyboard);
       wlr_input_method_keyboard_grab_v2_send_modifiers(grab, &m_keyboard->modifiers);
@@ -173,17 +237,19 @@ namespace umbriel {
 
   void Keyboard::handleKey(void* data) {
     auto* event = static_cast<wlr_keyboard_key_event*>(data);
-    m_server->notifyIdleActivity();
+    if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+      m_server->notifyInputActivity();
+    } else {
+      m_server->notifyIdleActivity();
+    }
     wlr_seat* seat = m_server->seat()->wlr();
 
     uint32_t keycode = event->keycode + 8;
     const xkb_keysym_t* syms = nullptr;
     int nsyms = xkb_state_key_get_syms(m_keyboard->xkb_state, keycode, &syms);
-    const xkb_keysym_t* rawSyms = nullptr;
     xkb_keymap* keymap = xkb_state_get_keymap(m_keyboard->xkb_state);
     const xkb_layout_index_t layout = xkb_state_key_get_layout(m_keyboard->xkb_state, keycode);
-    const int nraw = xkb_keymap_key_get_syms_by_level(keymap, keycode, layout, 0, &rawSyms);
-    const uint32_t rawSym = nraw > 0 ? rawSyms[0] : XKB_KEY_NoSymbol;
+    const uint32_t rawSym = rawShortcutKeysym(keymap, keycode, layout);
     const bool modifierOnly = nsyms > 0 && syms[0] >= XKB_KEY_Shift_L && syms[0] <= XKB_KEY_Hyper_R;
 
     bool handled = false;
@@ -229,18 +295,18 @@ namespace umbriel {
           quitConfirmConsumed = true;
         }
       }
-      const Keybind* matched = nullptr;
+      std::optional<Keybind> matched;
       if (!quitConfirmConsumed) {
         for (int i = 0; i < nsyms; ++i) {
-          const Keybind* result = m_server->handleKeybind(syms[i], rawSym, modifiers);
-          if (result != nullptr) {
-            matched = result;
+          std::optional<Keybind> result = m_server->handleKeybind(syms[i], rawSym, modifiers);
+          if (result.has_value()) {
+            matched = std::move(result);
             handled = true;
             break;
           }
         }
       }
-      if (matched != nullptr) {
+      if (matched.has_value()) {
         armRepeat(*matched, event->keycode);
       }
       // Unbound plain keys drive overview navigation instead of reaching clients, unless a layer surface (launcher,
@@ -257,7 +323,7 @@ namespace umbriel {
       // Any non-modifier key press dismisses the cheatsheet, except the key
       // that just toggled it.
       if (Cheatsheet* sheet = m_server->cheatsheet(); sheet != nullptr && sheet->visible()) {
-        const bool cheatsheetBind = matched != nullptr && isCheatsheetAction(matched->action);
+        const bool cheatsheetBind = matched.has_value() && isCheatsheetAction(matched->action);
         if (!cheatsheetBind && !modifierOnly) {
           sheet->hide();
         }
@@ -270,7 +336,7 @@ namespace umbriel {
     }
 
     if (!handled) {
-      wlr_input_method_keyboard_grab_v2* grab = m_server->inputMethodRelay()->grabForKeyboard(m_keyboard);
+      wlr_input_method_keyboard_grab_v2* grab = activeInputMethodGrab();
       if (grab != nullptr) {
         wlr_input_method_keyboard_grab_v2_set_keyboard(grab, m_keyboard);
         wlr_input_method_keyboard_grab_v2_send_key(grab, event->time_msec, event->keycode, event->state);

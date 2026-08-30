@@ -67,6 +67,11 @@ namespace {
 
 UMBRIEL_TEST(anEmptyBindListProducesNoRows) { CHECK(buildCheatsheetRows({}).empty()); }
 
+UMBRIEL_TEST(utf8ArrowOccupiesOneCheatsheetColumn) {
+  CHECK_EQ(umbriel::cheatsheetChordColumns("Mod+\xe2\x86\x93"), size_t{5});
+  CHECK_EQ(umbriel::cheatsheetChordColumns("Mod+WheelDown"), size_t{13});
+}
+
 UMBRIEL_TEST(bindsWithNoActionAreSkipped) {
   const std::vector<Keybind> binds = {Keybind{}, bind(KeybindAction::WindowClose, XKB_KEY_q)};
   const auto rows = buildCheatsheetRows(binds);
@@ -199,6 +204,19 @@ UMBRIEL_TEST(anIncompleteWorkspaceRunIsLeftAlone) {
   CHECK_EQ(countRows(rows, KeybindAction::WorkspaceSwitch), size_t{3});
 }
 
+UMBRIEL_TEST(workspaceRunsKeepPostActionSubmapTransitions) {
+  std::vector<Keybind> binds;
+  for (int i = 0; i < 9; ++i) {
+    Keybind workspace = workspaceBind(static_cast<uint32_t>(XKB_KEY_1 + i), std::to_string(i + 1));
+    workspace.submapAfter = umbriel::SubmapArg{.name = "inner"};
+    binds.push_back(std::move(workspace));
+  }
+
+  const auto rows = buildCheatsheetRows(binds);
+  CHECK_EQ(rows.size(), size_t{1});
+  CHECK(rows[0].action.contains("inner"));
+}
+
 UMBRIEL_TEST(submapBindsCarryTheirSubmap) {
   Keybind inSubmap = bind(KeybindAction::WindowFocusLeft, XKB_KEY_h);
   inSubmap.submap = "resize";
@@ -211,6 +229,18 @@ UMBRIEL_TEST(submapBindsCarryTheirSubmap) {
   const bool haveSubmap = std::ranges::any_of(rows, [](const CheatsheetRow& r) { return r.submap == "resize"; });
   CHECK(haveTopLevel);
   CHECK(haveSubmap);
+}
+
+UMBRIEL_TEST(postActionSubmapsRemainDistinctAndVisible) {
+  Keybind resets = bind(KeybindAction::WindowFocusLeft, XKB_KEY_h);
+  resets.submapAfter = umbriel::SubmapArg{.name = "reset"};
+  Keybind enters = bind(KeybindAction::WindowFocusLeft, XKB_KEY_Left);
+  enters.submapAfter = umbriel::SubmapArg{.name = "inner"};
+
+  const std::vector<CheatsheetRow> rows = buildCheatsheetRows(std::vector<Keybind>{resets, enters});
+  CHECK_EQ(rows.size(), size_t{2});
+  CHECK(rows[0].action.contains("inner") || rows[1].action.contains("inner"));
+  CHECK(rows[0].action.contains("reset") || rows[1].action.contains("reset"));
 }
 
 UMBRIEL_TEST(groupTitlesArePlainTextNotMarkup) {

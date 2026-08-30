@@ -23,6 +23,7 @@ namespace umbriel {
         std::unique_ptr<SavedNode> left;
         std::unique_ptr<SavedNode> right;
         double ratio = 0.5;
+        bool locked = false;
         LayoutMemberId member = 0;
       };
 
@@ -88,45 +89,45 @@ namespace umbriel {
     return nullptr;
   }
 
-  std::vector<DwindleLayout::WidthSplit> DwindleLayout::widthSplits(Node* node) const {
-    std::vector<WidthSplit> splits;
+  std::vector<DwindleLayout::Split> DwindleLayout::splits(Node* node, Node::Type type) const {
+    std::vector<Split> result;
     Node* child = node;
     while (child != nullptr && child->parent != nullptr) {
       Node* parent = child->parent;
-      if (parent->type == Node::HSplit) {
-        splits.push_back({.node = parent, .first = parent->left.get() == child});
+      if (parent->type == type) {
+        result.push_back({.node = parent, .first = parent->left.get() == child});
       }
       child = parent;
     }
 
     double outerProduct = 1.0;
-    for (auto& split : std::views::reverse(splits)) {
+    for (auto& split : std::views::reverse(result)) {
       split.outerProduct = outerProduct;
-      outerProduct *= widthShare(split);
+      outerProduct *= splitShare(split);
     }
-    return splits;
+    return result;
   }
 
-  double DwindleLayout::widthShare(const WidthSplit& split) {
+  double DwindleLayout::splitShare(const Split& split) {
     return split.first ? split.node->ratio : 1.0 - split.node->ratio;
   }
 
-  void DwindleLayout::setWidthShare(const WidthSplit& split, double share) {
+  void DwindleLayout::setSplitShare(const Split& split, double share) {
     split.node->ratio = split.first ? share : 1.0 - share;
   }
 
-  bool DwindleLayout::applyWidthFraction(const std::vector<WidthSplit>& splits, double fraction) {
+  bool DwindleLayout::applyFraction(const std::vector<Split>& splits, double fraction) {
     if (splits.empty()) {
       return false;
     }
 
     const double used = std::clamp(fraction, 0.1, 1.0);
     double innerProduct = 1.0;
-    for (const WidthSplit& split : splits) {
+    for (const Split& split : splits) {
       const double denominator = innerProduct * split.outerProduct;
       const double desired = denominator > 0.0 ? used / denominator : std::numeric_limits<double>::infinity();
       const double applied = std::clamp(desired, 0.1, 0.9);
-      setWidthShare(split, applied);
+      setSplitShare(split, applied);
       innerProduct *= applied;
       if (applied == desired) {
         break;
@@ -224,10 +225,9 @@ namespace umbriel {
       return;
     }
 
-    if (node->type == Node::AutoSplit) {
-      // Split the longer edge, so a portrait output stacks first instead of tiling side by side. Resolved on the first
-      // arrange after the split and then frozen: an interactive resize elsewhere in the tree must never rotate a split
-      // the user is not touching.
+    if (node->type == Node::AutoSplit || (!node->locked && !m_config->dwindle.preserveSplit)) {
+      // AutoSplit and unlocked splits follow the longer edge. With preserve_split enabled, the first arrange resolves
+      // AutoSplit and then freezes it, while explicit directional drops remain fixed.
       node->type = area.width >= area.height ? Node::HSplit : Node::VSplit;
     }
 
@@ -342,6 +342,7 @@ namespace umbriel {
       auto saved = std::make_unique<DwindleSnapshot::SavedNode>();
       saved->type = node->type;
       saved->ratio = node->ratio;
+      saved->locked = node->locked;
       if (node->type == Node::Leaf) {
         const auto id = static_cast<LayoutMemberId>(capture.members.size());
         capture.members.push_back({.id = id, .view = node->view});
@@ -388,6 +389,7 @@ namespace umbriel {
       node->type = saved->type;
       node->parent = parent;
       node->ratio = saved->ratio;
+      node->locked = saved->locked;
       node->left = self(self, saved->left.get(), node.get());
       node->right = self(self, saved->right.get(), node.get());
       if (node->left == nullptr) {
@@ -422,57 +424,51 @@ namespace umbriel {
       return;
     }
     const int count = static_cast<int>(m_flatColumns.size());
-    const int targetIndex = std::clamp(columnIndex, 0, count);
-    Node* target = nullptr;
-    if (targetIndex >= count) {
-      target = nodeAtFlatIndex(count - 1);
+    const int gap = std::clamp(columnIndex, 0, count);
+    if (gap == 0) {
+      splitLeaf(nodeAtFlatIndex(0), view, Node::AutoSplit, /*newFirst=*/true);
     } else {
-      target = nodeAtFlatIndex(targetIndex);
-    }
-    if (target != nullptr && target->type == Node::Leaf) {
-      splitLeaf(target, view, Node::AutoSplit, /*newFirst=*/false);
-    } else if (targetIndex < count) {
-      target = nodeAtFlatIndex(targetIndex);
-      if (target != nullptr && target->type == Node::Leaf) {
-        splitLeaf(target, view, Node::AutoSplit, /*newFirst=*/false);
-      }
+      splitLeaf(nodeAtFlatIndex(gap - 1), view, Node::AutoSplit, /*newFirst=*/false);
     }
     rebuildFlatColumns();
   }
 
   void DwindleLayout::insertViewIntoColumn(View* view, int columnIndex, int /*rowIndex*/) {
-    insertView(view, columnIndex);
+    if (view == nullptr || findNode(view) != nullptr) {
+      return;
+    }
+    if (m_root == nullptr) {
+      auto node = std::make_unique<Node>();
+      node->type = Node::Leaf;
+      node->view = view;
+      m_root = std::move(node);
+      rebuildFlatColumns();
+      return;
+    }
+    const int count = static_cast<int>(m_flatColumns.size());
+    Node* target = nodeAtFlatIndex(std::clamp(columnIndex, 0, count - 1));
+    if (target != nullptr && target->type == Node::Leaf) {
+      splitLeaf(target, view, Node::AutoSplit, /*newFirst=*/false);
+    }
+    rebuildFlatColumns();
   }
 
-  bool DwindleLayout::consumeLeft(View* view) {
-    Node* a = findNode(view);
-    const int col = columnOf(view);
-    if (a == nullptr || col <= 0) {
+  bool DwindleLayout::consume(View* view, int direction) {
+    Node* node = findNode(view);
+    if ((direction != -1 && direction != 1) || node == nullptr) {
       return false;
     }
-    Node* b = nodeAtFlatIndex(col - 1);
-    if (b == nullptr || b->type != Node::Leaf) {
-      return false;
-    }
-    return swapLeafViews(a, b);
+    Node* destination = findNode(umbriel::directionalNeighbor(m_targets, view, true, direction));
+    return swapLeafViews(node, destination);
   }
 
-  bool DwindleLayout::expelRight(View* view) {
-    Node* a = findNode(view);
-    const int col = columnOf(view);
-    if (a == nullptr || col < 0 || col + 1 >= static_cast<int>(m_flatColumns.size())) {
-      return false;
-    }
-    Node* b = nodeAtFlatIndex(col + 1);
-    if (b == nullptr || b->type != Node::Leaf) {
-      return false;
-    }
-    return swapLeafViews(a, b);
-  }
+  bool DwindleLayout::expel(View* view, int direction) { return consume(view, direction); }
 
   bool DwindleLayout::moveViewVertical(View* view, int direction) {
     return swapLeafViews(findNode(view), findNode(umbriel::directionalNeighbor(m_targets, view, false, direction)));
   }
+
+  bool DwindleLayout::swapViews(View* a, View* b) { return swapLeafViews(findNode(a), findNode(b)); }
 
   void DwindleLayout::removeView(View* view) {
     Node* node = findNode(view);
@@ -513,19 +509,20 @@ namespace umbriel {
     rebuildFlatColumns();
   }
 
-  Layout::InitialSize
-  DwindleLayout::initialSize(const wlr_box& usable, std::optional<double> /*ruleWidthFraction*/) const {
+  Layout::InitialSize DwindleLayout::initialSize(
+      const wlr_box& usable, std::optional<double> /*ruleWidthFraction*/, const View* splitAnchor
+  ) const {
     const wlr_box content = contentArea(usable);
     // A window rule's default_width is a viewport fraction, which a splitting layout has no use for. The first leaf
     // owns the whole area.
     if (m_flatColumns.empty()) {
       return {.width = content.width, .height = content.height};
     }
-    // Any later view splits an existing leaf along that leaf's longer edge, so the answer has to follow the same rule
-    // arrange() will apply, or a portrait output configures every new window at half width and full height and the
-    // client visibly resizes on its first paint. The append target is the best available guess: which leaf an insert
-    // lands on depends on the caller's focused column, which the layout cannot see.
-    const Node* target = nodeAtFlatIndex(static_cast<int>(m_flatColumns.size()) - 1);
+    // A focused insert splits the anchor leaf. Without a tiled anchor, the caller appends and splits the last leaf.
+    const Node* target = findNode(splitAnchor);
+    if (target == nullptr || target->type != Node::Leaf) {
+      target = nodeAtFlatIndex(static_cast<int>(m_flatColumns.size()) - 1);
+    }
     const int width = target != nullptr && target->areaW > 0 ? target->areaW : content.width;
     const int height = target != nullptr && target->areaH > 0 ? target->areaH : content.height;
     const auto half = [gap = m_config->totalGap](int span) {
@@ -573,13 +570,13 @@ namespace umbriel {
 
   bool DwindleLayout::cycleWidth(int columnIndex, int direction) {
     Node* node = nodeAtFlatIndex(columnIndex);
-    const std::vector<WidthSplit> splits = widthSplits(node);
-    if (splits.empty()) {
+    const std::vector<Split> axisSplits = splits(node, Node::HSplit);
+    if (axisSplits.empty()) {
       return false;
     }
     double current = 1.0;
-    for (const WidthSplit& split : splits) {
-      current *= widthShare(split);
+    for (const Split& split : axisSplits) {
+      current *= splitShare(split);
     }
     const auto& presets = m_config->widthPresets;
     double next = 0.0;
@@ -592,59 +589,75 @@ namespace umbriel {
       const auto it = std::ranges::find_if(presets, [current](double preset) { return preset > current + 0.0001; });
       next = it == presets.end() ? presets[0] : *it;
     }
-    return applyWidthFraction(splits, next);
+    return applyFraction(axisSplits, next);
   }
 
   bool DwindleLayout::toggleFullWidth(int columnIndex) {
     Node* node = nodeAtFlatIndex(columnIndex);
-    const std::vector<WidthSplit> splits = widthSplits(node);
-    if (splits.empty()) {
+    const std::vector<Split> axisSplits = splits(node, Node::HSplit);
+    if (axisSplits.empty()) {
       return false;
     }
     double current = 1.0;
     double maximum = 1.0;
-    for (const WidthSplit& split : splits) {
-      current *= widthShare(split);
+    for (const Split& split : axisSplits) {
+      current *= splitShare(split);
       maximum *= 0.9;
     }
     if (current >= maximum - 0.0001) {
-      applyWidthFraction(splits, 0.5);
+      applyFraction(axisSplits, 0.5);
       return false;
     }
-    applyWidthFraction(splits, 1.0);
+    applyFraction(axisSplits, 1.0);
     return true;
   }
 
   bool DwindleLayout::isFullWidth(int columnIndex) const {
-    const std::vector<WidthSplit> splits = widthSplits(nodeAtFlatIndex(columnIndex));
-    if (splits.empty()) {
+    const std::vector<Split> axisSplits = splits(nodeAtFlatIndex(columnIndex), Node::HSplit);
+    if (axisSplits.empty()) {
       return false;
     }
     double current = 1.0;
     double maximum = 1.0;
-    for (const WidthSplit& split : splits) {
-      current *= widthShare(split);
+    for (const Split& split : axisSplits) {
+      current *= splitShare(split);
       maximum *= 0.9;
     }
     return current >= maximum - 0.0001;
   }
 
   bool DwindleLayout::setWidthFraction(int columnIndex, double fraction) {
-    return applyWidthFraction(widthSplits(nodeAtFlatIndex(columnIndex)), fraction);
+    return applyFraction(splits(nodeAtFlatIndex(columnIndex), Node::HSplit), fraction);
   }
 
   void DwindleLayout::clearFullWidthState(int /*columnIndex*/) {}
 
   double DwindleLayout::widthFraction(int columnIndex) const {
-    const std::vector<WidthSplit> splits = widthSplits(nodeAtFlatIndex(columnIndex));
-    if (splits.empty()) {
+    const std::vector<Split> axisSplits = splits(nodeAtFlatIndex(columnIndex), Node::HSplit);
+    if (axisSplits.empty()) {
       return 1.0;
     }
     double fraction = 1.0;
-    for (const WidthSplit& split : splits) {
-      fraction *= widthShare(split);
+    for (const Split& split : axisSplits) {
+      fraction *= splitShare(split);
     }
     return fraction;
+  }
+
+  double DwindleLayout::heightFraction(const View* view) const {
+    const std::vector<Split> axisSplits = splits(findNode(view), Node::VSplit);
+    if (axisSplits.empty()) {
+      return 1.0;
+    }
+    double fraction = 1.0;
+    for (const Split& split : axisSplits) {
+      fraction *= splitShare(split);
+    }
+    return fraction;
+  }
+
+  bool DwindleLayout::setHeightFraction(View* view, double fraction) {
+    return applyFraction(splits(findNode(view), Node::VSplit), fraction);
   }
 
   // Drag-and-drop directional insertion
@@ -664,6 +677,7 @@ namespace umbriel {
     const bool horizontal = (edge & (WLR_EDGE_LEFT | WLR_EDGE_RIGHT)) != 0;
     const bool newFirst = (edge & (WLR_EDGE_LEFT | WLR_EDGE_TOP)) != 0;
     splitLeaf(target, newView, horizontal ? Node::HSplit : Node::VSplit, newFirst);
+    target->locked = true;
     rebuildFlatColumns();
   }
 

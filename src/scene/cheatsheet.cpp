@@ -1,6 +1,7 @@
 #include "scene/cheatsheet.h"
 
 #include "config/config.h"
+#include "scene/border_rect.h"
 #include "scene/cheatsheet_rows.h"
 #include "scene/color.h"
 #include "scene/text_buffer.h"
@@ -10,7 +11,6 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
-#include <glib.h>
 #include <limits>
 #include <linux/input-event-codes.h>
 #include <string>
@@ -20,10 +20,13 @@
 namespace {
 
   using umbriel::balancedColumnHeight;
+  using umbriel::cheatsheetChordColumns;
   using umbriel::CheatsheetRow;
+  using umbriel::escapeMarkup;
   using umbriel::Group;
   using umbriel::groupForAction;
   using umbriel::groupTitle;
+  using umbriel::keycapBackgroundColor;
   using umbriel::renderTextBuffer;
   using umbriel::rgbaHex;
   using umbriel::TextBufferResult;
@@ -38,12 +41,7 @@ namespace {
   };
 
   CheatsheetPalette makeCheatsheetPalette(const umbriel::Config::Colors& colors) {
-    constexpr float kKeycapLift = 0.09F;
-    std::array<float, 4> keycapBackground{};
-    for (size_t component = 0; component < 3; ++component) {
-      keycapBackground[component] = std::lerp(colors.background[component], colors.textPrimary[component], kKeycapLift);
-    }
-    keycapBackground[3] = 1.0F;
+    const std::array<float, 4> keycapBackground = keycapBackgroundColor(colors.background, colors.textPrimary);
     return {
         .textPrimary = rgbaHex(colors.textPrimary),
         .textMuted = rgbaHex(colors.textMuted),
@@ -55,6 +53,7 @@ namespace {
   }
 
   constexpr int kPad = 28;
+  constexpr int kBorderWidth = 1;
   constexpr int kColumnGap = 32;
   constexpr int kTitleBodyGap = 12;
   constexpr int kBodyFooterGap = 12;
@@ -64,15 +63,6 @@ namespace {
   // reached once every column count has been tried and the panel still does not fit. 9 is the floor because below it
   // the chord pills stop being readable at arm's length, which is the whole job.
   constexpr int kFontSizes[] = {11, 10, 9};
-
-  // Chord reconstruction helpers
-  // Escape text for Pango markup.
-  std::string escape(const std::string& text) {
-    gchar* escaped = g_markup_escape_text(text.c_str(), -1);
-    std::string result(escaped);
-    g_free(escaped);
-    return result;
-  }
 
   // Fixed groups in display order; submaps follow in first-seen order.
   constexpr Group kFixedGroups[] = {
@@ -97,9 +87,8 @@ namespace {
     lines.push_back({
         .isHeader = true,
         .group = groupId,
-        .text = std::format(
-            "<span foreground='{}' weight='bold'>{}</span>", palette.accentSecondary, escape(std::string(title))
-        ),
+        .text =
+            std::format("<span foreground='{}' weight='bold'>{}</span>", palette.accentSecondary, escapeMarkup(title)),
     });
   }
 
@@ -110,15 +99,16 @@ namespace {
       const CheatsheetPalette& palette
   ) {
     const bool isDitto = label == "\xe2\x80\xb3";
-    const size_t extraPad = maxChordLen > chord.size() ? maxChordLen - chord.size() : 0;
+    const size_t chordColumns = cheatsheetChordColumns(chord);
+    const size_t extraPad = maxChordLen > chordColumns ? maxChordLen - chordColumns : 0;
     return {
         .isHeader = false,
         .isDitto = isDitto,
         .group = groupId,
         .text = std::format(
             "<span background='{}' foreground='{}'> {} </span>{}  <span foreground='{}'>{}</span>",
-            palette.keycapBackground, palette.accentPrimary, escape(chord), std::string(extraPad, ' '),
-            isDitto ? palette.textMuted : palette.textPrimary, escape(label)
+            palette.keycapBackground, palette.accentPrimary, escapeMarkup(chord), std::string(extraPad, ' '),
+            isDitto ? palette.textMuted : palette.textPrimary, escapeMarkup(label)
         ),
     };
   }
@@ -171,9 +161,12 @@ namespace {
         for (const auto* row : binRows) {
           std::string label = row->action;
           if (label != "\xe2\x80\xb3") {
-            label = row->spawnArgs.empty() ? row->spawnBinary : row->spawnBinary + " " + row->action;
+            label = row->spawnArgs.empty() ? row->spawnBinary : row->spawnBinary + " " + row->spawnArgs;
             if (label.size() > 32) {
               label = label.substr(0, 32) + "\xe2\x80\xa6";
+            }
+            if (!row->submapAfter.empty()) {
+              label += " \xe2\x86\x92 " + row->submapAfter;
             }
           }
           lines.push_back(bindLine(row->chord, label, groupId, maxChordLen, palette));
@@ -218,7 +211,7 @@ namespace {
       // Find max chord width in this group (character count, for padding).
       size_t maxChordLen = 0;
       for (const auto* row : groupRows) {
-        maxChordLen = std::max(maxChordLen, row->chord.size());
+        maxChordLen = std::max(maxChordLen, cheatsheetChordColumns(row->chord));
       }
 
       if (grp == Group::Apps) {
@@ -248,7 +241,7 @@ namespace {
 
       size_t maxChordLen = 0;
       for (const auto* row : groupRows) {
-        maxChordLen = std::max(maxChordLen, row->chord.size());
+        maxChordLen = std::max(maxChordLen, cheatsheetChordColumns(row->chord));
       }
 
       for (const auto* row : groupRows) {
@@ -576,13 +569,18 @@ namespace umbriel {
 
     // Shadow and panel use the configured corner radius.
     const int cornerRadius = config().appearance.cornerRadius;
-    m_shadow.update(m_tree, panelW, panelH, 0, cornerRadius);
+    m_shadow.update(m_tree, panelW, panelH, kBorderWidth, cornerRadius);
+
+    float borderColor[4]{};
+    premultiplied(borderColor, config().colors.accentPrimary, 1.0F);
+    wlr_scene_border* panelBorder = wlr_scene_border_create(m_tree, borderColor, borderColor);
+    applyBorderGeometry(panelBorder, makeBorderRing(panelW, panelH, cornerRadius, kBorderWidth, 0), kBorderWidth, 0);
 
     // Panel rect.
     float panelColor[4]{};
     premultiplied(panelColor, config().colors.background, 1.0F);
     wlr_scene_rect* panelRect = wlr_scene_rect_create(m_tree, panelW, panelH, panelColor);
-    wlr_scene_rect_set_corner_radius(panelRect, cornerRadius);
+    wlr_scene_rect_set_corner_radius(panelRect, nestedRadius(cornerRadius, kBorderWidth));
     (void)panelRect;
 
     // Helper to add a text buffer to the scene tree.

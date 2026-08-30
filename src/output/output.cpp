@@ -1,11 +1,13 @@
 #include "output/output.h"
 
 #include "config/config.h"
+#include "config/resolve.h"
 #include "core/log.h"
 #include "input/seat.h"
 #include "layer/layer_surface.h"
 #include "output/frame_schedule.h"
 #include "output/hdr_format.h"
+#include "output/identity.h"
 #include "overview/overview.h"
 #include "scene/cheatsheet.h"
 #include "scene/config_banner.h"
@@ -29,17 +31,22 @@ namespace umbriel {
     constexpr Logger kLog("output");
     constexpr int kFrameRetryDelayMs = 16;
 
-    const OutputRule* findRule(const char* name) {
-      for (const OutputRule& rule : config().outputs) {
-        if (rule.name == name) {
-          return &rule;
-        }
-      }
-      return nullptr;
-    }
   } // namespace
 
-  Output::Output(Server& server, wlr_output* output) : m_server(&server), m_output(output) {
+  OutputIdentity Output::identity() const {
+    const auto text = [](const char* value) { return value != nullptr ? std::string_view(value) : std::string_view(); };
+    return m_output != nullptr
+        ? OutputIdentity{
+              .connector = text(m_output->name),
+              .make = text(m_output->make),
+              .model = text(m_output->model),
+              .serial = text(m_output->serial),
+          }
+        : OutputIdentity{};
+  }
+
+  Output::Output(Server& server, wlr_output* output)
+      : m_server(&server), m_output(output), m_defaultScale(output->scale) {
     m_output->data = this;
     wlr_output_init_render(m_output, m_server->allocator(), m_server->renderer());
 
@@ -81,7 +88,7 @@ namespace umbriel {
   }
 
   bool Output::configuredEnabled() const {
-    const OutputRule* rule = findRule(m_output->name);
+    const OutputRule* rule = findOutputRule(config(), identity());
     return rule == nullptr || rule->enabled;
   }
 
@@ -104,7 +111,7 @@ namespace umbriel {
   }
 
   HdrMode Output::hdrMode() const {
-    const OutputRule* rule = findRule(m_output->name);
+    const OutputRule* rule = findOutputRule(config(), identity());
     return rule != nullptr ? rule->hdr : HdrMode::Off;
   }
 
@@ -124,17 +131,17 @@ namespace umbriel {
   bool Output::hdrActive() const { return m_output->image_description != nullptr; }
 
   float Output::configuredSdrWhite() const {
-    const OutputRule* rule = findRule(m_output->name);
+    const OutputRule* rule = findOutputRule(config(), identity());
     return rule != nullptr ? rule->sdrWhite : 203.0F;
   }
 
   bool Output::configuredDirectScanoutEnabled() const {
-    const OutputRule* rule = findRule(m_output->name);
+    const OutputRule* rule = findOutputRule(config(), identity());
     return rule == nullptr || rule->directScanout;
   }
 
   bool Output::configuredTearingAllowed() const {
-    const OutputRule* rule = findRule(m_output->name);
+    const OutputRule* rule = findOutputRule(config(), identity());
     return rule != nullptr && rule->allowTearing;
   }
 
@@ -154,7 +161,7 @@ namespace umbriel {
     if (View* focused = workspace->focusedView(); eligible(focused)) {
       return focused;
     }
-    const std::vector<View*> views = workspace->allViews();
+    const auto& views = workspace->allViews();
     const auto candidate = std::ranges::find_if(views, eligible);
     return candidate != views.end() ? *candidate : nullptr;
   }
@@ -225,7 +232,8 @@ namespace umbriel {
   }
 
   bool Output::applyConfiguredState() {
-    const OutputRule* rule = findRule(m_output->name);
+    const OutputRule* rule = findOutputRule(config(), identity());
+    const std::optional<double> configuredScale = rule != nullptr ? rule->scale : std::nullopt;
     const bool configured = configuredEnabled();
     const bool enabled = configured && !m_dpmsOff;
     wlr_output_state state{};
@@ -239,6 +247,7 @@ namespace umbriel {
 
     bool vrrRequested = false;
     bool vrrStaged = false;
+    bool scaleStaged = false;
     if (enabled) {
       if (rule != nullptr && rule->mode) {
         if (wlr_output_is_wl(m_output)) {
@@ -277,8 +286,12 @@ namespace umbriel {
         }
       }
 
-      if (rule != nullptr && rule->scale) {
-        wlr_output_state_set_scale(&state, static_cast<float>(*rule->scale));
+      if (configuredScale) {
+        wlr_output_state_set_scale(&state, static_cast<float>(*configuredScale));
+        scaleStaged = true;
+      } else if (m_appliedConfiguredScale) {
+        wlr_output_state_set_scale(&state, m_defaultScale);
+        scaleStaged = true;
       }
       if (rule != nullptr && rule->transform) {
         wlr_output_state_set_transform(&state, static_cast<wl_output_transform>(*rule->transform));
@@ -384,6 +397,9 @@ namespace umbriel {
       kLog.error("output '{}': failed to commit configured state", m_output->name);
       return false;
     }
+    if (enabled && scaleStaged) {
+      m_appliedConfiguredScale = configuredScale.has_value();
+    }
     const bool hdrIsActive = hdrActive();
     if (hdrIsActive) {
       setHdrFallbackReason({});
@@ -414,7 +430,7 @@ namespace umbriel {
   }
 
   bool Output::configuredVrrEnabled() const {
-    const OutputRule* rule = findRule(m_output->name);
+    const OutputRule* rule = findOutputRule(config(), identity());
     const VrrMode outputMode = rule != nullptr ? rule->vrr : VrrMode::Disabled;
     const bool fullscreen = hasFullscreenView();
 
@@ -514,7 +530,7 @@ namespace umbriel {
   }
 
   wlr_output_layout_output* Output::addToLayout() {
-    const OutputRule* rule = findRule(m_output->name);
+    const OutputRule* rule = findOutputRule(config(), identity());
     if (rule != nullptr && rule->position) {
       return wlr_output_layout_add(m_server->outputLayout(), m_output, (*rule->position)[0], (*rule->position)[1]);
     }

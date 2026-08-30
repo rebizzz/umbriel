@@ -171,9 +171,12 @@ namespace umbriel {
         {"dpms-on", "[<output>]", KeybindAction::DpmsOn, ActionArgKind::OptionalOutput},
         {"keyboard-layout-next", "", KeybindAction::KeyboardLayoutNext},
         {"layout-scroll-down", "", KeybindAction::LayoutScrollDown},
+        {"layout-scroll-drag", "", KeybindAction::LayoutScrollDrag},
         {"layout-scroll-left", "", KeybindAction::LayoutScrollLeft},
         {"layout-scroll-right", "", KeybindAction::LayoutScrollRight},
         {"layout-scroll-up", "", KeybindAction::LayoutScrollUp},
+        {"master-count-decrease", "", KeybindAction::MasterCountDecrease},
+        {"master-count-increase", "", KeybindAction::MasterCountIncrease},
         {"output-focus-down", "", KeybindAction::OutputFocusDown},
         {"output-focus-left", "", KeybindAction::OutputFocusLeft},
         {"output-focus-right", "", KeybindAction::OutputFocusRight},
@@ -181,19 +184,26 @@ namespace umbriel {
         {"overview-close", "", KeybindAction::OverviewClose},
         {"overview-open", "", KeybindAction::OverviewOpen},
         {"overview-toggle", "", KeybindAction::OverviewToggle},
-        {"scratchpad-focus-next", "[<output>]", KeybindAction::ScratchpadFocusNext, ActionArgKind::OptionalOutput},
-        {"scratchpad-toggle", "[<output>]", KeybindAction::ScratchpadToggle, ActionArgKind::OptionalOutput},
+        {"scratchpad-focus-next", "[<name>[/<output>]]", KeybindAction::ScratchpadFocusNext,
+         ActionArgKind::OptionalScratchpad},
+        {"scratchpad-toggle", "[<name>[/<output>]]", KeybindAction::ScratchpadToggle,
+         ActionArgKind::OptionalScratchpad},
         {"session-quit", "[skip-confirmation]", KeybindAction::SessionQuit, ActionArgKind::SkipConfirmation},
         {"spawn", "<cmd>", KeybindAction::Spawn, ActionArgKind::Command},
         {"submap", "<name>", KeybindAction::Submap, ActionArgKind::Command},
         {"window-center", "", KeybindAction::WindowCenter},
         {"window-close", "[<window-id>]", KeybindAction::WindowClose, ActionArgKind::OptionalWindowId},
         {"window-consume-left", "", KeybindAction::WindowConsumeLeft},
+        {"window-consume-or-expel-left", "", KeybindAction::WindowConsumeOrExpelLeft},
+        {"window-consume-or-expel-right", "", KeybindAction::WindowConsumeOrExpelRight},
+        {"window-consume-right", "", KeybindAction::WindowConsumeRight},
+        {"window-cycle-height", "", KeybindAction::WindowCycleHeight},
+        {"window-cycle-height-back", "", KeybindAction::WindowCycleHeightBack},
         {"window-cycle-width", "", KeybindAction::WindowCycleWidth},
         {"window-cycle-width-back", "", KeybindAction::WindowCycleWidthBack},
-        {"window-expel-right", "", KeybindAction::WindowExpelRight},
         {"window-focus", "<window-id>", KeybindAction::WindowFocusId, ActionArgKind::WindowId},
         {"window-focus-down", "", KeybindAction::WindowFocusDown},
+        {"window-focus-last", "", KeybindAction::WindowFocusLast},
         {"window-focus-left", "", KeybindAction::WindowFocusLeft},
         {"window-focus-next", "", KeybindAction::WindowFocusNext},
         {"window-focus-or-output-down", "", KeybindAction::WindowFocusOrOutputDown},
@@ -202,10 +212,12 @@ namespace umbriel {
         {"window-focus-or-output-up", "", KeybindAction::WindowFocusOrOutputUp},
         {"window-focus-or-workspace-down", "", KeybindAction::WindowFocusOrWorkspaceDown},
         {"window-focus-or-workspace-up", "", KeybindAction::WindowFocusOrWorkspaceUp},
+        {"window-focus-previous", "", KeybindAction::WindowFocusPrevious},
         {"window-focus-right", "", KeybindAction::WindowFocusRight},
         {"window-focus-switch-floating", "", KeybindAction::WindowFocusSwitchFloating},
         {"window-focus-up", "", KeybindAction::WindowFocusUp},
         {"window-focus-warp", "<window-id>", KeybindAction::WindowFocusWarpId, ActionArgKind::WindowId},
+        {"window-modify-height", "<delta>", KeybindAction::WindowModifyHeight, ActionArgKind::WidthDelta},
         {"window-modify-width", "<delta>", KeybindAction::WindowModifyWidth, ActionArgKind::WidthDelta},
         {"window-move-down", "", KeybindAction::WindowMoveDown},
         {"window-move-or-output-down", "", KeybindAction::WindowMoveOrOutputDown},
@@ -218,23 +230,29 @@ namespace umbriel {
         {"window-move-to-output-left", "", KeybindAction::WindowMoveToOutputLeft},
         {"window-move-to-output-right", "", KeybindAction::WindowMoveToOutputRight},
         {"window-move-to-output-up", "", KeybindAction::WindowMoveToOutputUp},
-        {"window-move-to-scratchpad", "[<output>]", KeybindAction::WindowMoveToScratchpad,
-         ActionArgKind::OptionalOutput},
+        {"window-move-to-scratchpad", "[<name>[/<output>]]", KeybindAction::WindowMoveToScratchpad,
+         ActionArgKind::OptionalScratchpad},
+        {"window-move-to-scratchpad-silent", "[<name>[/<output>]]", KeybindAction::WindowMoveToScratchpadSilent,
+         ActionArgKind::OptionalScratchpad},
         {"window-move-to-workspace", "<workspace>[/<output>]", KeybindAction::WindowMoveToWorkspace,
          ActionArgKind::Workspace},
         {"window-move-to-workspace-next", "", KeybindAction::WindowMoveToWorkspaceNext},
         {"window-move-to-workspace-previous", "", KeybindAction::WindowMoveToWorkspacePrevious},
         {"window-move-up", "", KeybindAction::WindowMoveUp},
-        {"window-restore-from-scratchpad", "[<output>]", KeybindAction::WindowRestoreFromScratchpad,
-         ActionArgKind::OptionalOutput},
+        {"window-restore-from-scratchpad", "[<name>[/<output>]]", KeybindAction::WindowRestoreFromScratchpad,
+         ActionArgKind::OptionalScratchpad},
+        {"window-set-height", "<fraction>", KeybindAction::WindowSetHeight, ActionArgKind::WidthFraction},
         {"window-set-width", "<fraction>", KeybindAction::WindowSetWidth, ActionArgKind::WidthFraction},
+        {"window-swap-next", "", KeybindAction::WindowSwapNext},
+        {"window-swap-previous", "", KeybindAction::WindowSwapPrevious},
         {"window-toggle-floating", "", KeybindAction::ToggleFloating},
         {"window-toggle-fullscreen", "", KeybindAction::ToggleFullscreen},
         {"window-toggle-maximize", "", KeybindAction::ToggleMaximize},
         {"window-toggle-maximize-to-edges", "", KeybindAction::ToggleMaximizeToEdges},
         {"window-toggle-pinned", "", KeybindAction::TogglePinned},
-        {"window-toggle-scratchpad", "[<output>]", KeybindAction::WindowToggleScratchpad,
-         ActionArgKind::OptionalOutput},
+        {"window-toggle-scratchpad", "[<name>[/<output>]]", KeybindAction::WindowToggleScratchpad,
+         ActionArgKind::OptionalScratchpad},
+        {"workspace-focus-last", "", KeybindAction::WorkspaceFocusLast},
         {"workspace-move-down", "", KeybindAction::WorkspaceMoveDown},
         {"workspace-move-to-output-down", "", KeybindAction::WorkspaceMoveToOutputDown},
         {"workspace-move-to-output-left", "", KeybindAction::WorkspaceMoveToOutputLeft},
@@ -317,7 +335,7 @@ namespace umbriel {
           // "submap" shares the name:<text> syntax with "spawn", but its
           // argument is a submap name rather than a shell command.
           if (spec.action == KeybindAction::Submap) {
-            if (arg == "disable") {
+            if (!validSubmapName(arg)) {
               return false;
             }
             output.payload = SubmapArg{.name = std::string(arg)};
@@ -398,6 +416,31 @@ namespace umbriel {
           return true;
         }
         break;
+      case ActionArgKind::OptionalScratchpad: {
+        if (value == spec.name) {
+          output.action = spec.action;
+          output.payload = ScratchpadArg{};
+          return true;
+        }
+        if (takeActionArg(value, spec, arg)) {
+          ScratchpadArg scratchpad;
+          std::string_view target = arg;
+          if (target.starts_with("special:")) {
+            target.remove_prefix(8);
+          }
+          const size_t separator = target.find('/');
+          if (separator != std::string_view::npos) {
+            scratchpad.name = std::string(target.substr(0, separator));
+            scratchpad.output = std::string(target.substr(separator + 1));
+          } else {
+            scratchpad.name = std::string(target);
+          }
+          output.action = spec.action;
+          output.payload = std::move(scratchpad);
+          return true;
+        }
+        break;
+      }
       case ActionArgKind::WindowId:
         if (takeActionArg(value, spec, arg)) {
           output.action = spec.action;
@@ -494,7 +537,7 @@ namespace umbriel {
     add(KeybindAction::WindowMoveDown, XKB_KEY_j, WLR_MODIFIER_SHIFT);
 
     add(KeybindAction::WindowConsumeLeft, XKB_KEY_comma);
-    add(KeybindAction::WindowExpelRight, XKB_KEY_period);
+    add(KeybindAction::WindowConsumeRight, XKB_KEY_period);
     add(KeybindAction::WindowCycleWidth, XKB_KEY_r);
     add(KeybindAction::WindowCycleWidthBack, XKB_KEY_r, WLR_MODIFIER_SHIFT);
     add(KeybindAction::ToggleFullscreen, XKB_KEY_f);

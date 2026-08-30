@@ -31,19 +31,4 @@ namespace umbriel {
     m_views.insert(m_views.begin(), std::move(entry));
   }
 
-  View* ViewRegistry::rotateToNext(const std::function<bool(const View&)>& accept) {
-    if (m_views.size() < 2) {
-      return nullptr;
-    }
-    for (size_t n = 0; n < m_views.size(); ++n) {
-      auto current = std::move(m_views.front());
-      m_views.erase(m_views.begin());
-      m_views.push_back(std::move(current));
-      if (accept(*m_views.front())) {
-        return m_views.front().get();
-      }
-    }
-    return nullptr;
-  }
-
 } // namespace umbriel

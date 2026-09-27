@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - 'ci/**'
   pull_request:
     branches:
       - main
@@ -118,11 +119,19 @@ jobs:
       - name: Set up graphics drivers for Nix
         run: |
           MESA_DIR="$(nix build --inputs-from . nixpkgs#mesa --no-link --print-out-paths)"
-          sudo mkdir -p /run/opengl-driver/share/glvnd/egl_vendor.d /run/opengl-driver/lib/dri
-          sudo ln -sfn "$MESA_DIR"/share/glvnd/egl_vendor.d/* /run/opengl-driver/share/glvnd/egl_vendor.d/
-          sudo ln -sfn "$MESA_DIR"/lib/dri/* /run/opengl-driver/lib/dri/
-          sudo ln -sfn "$MESA_DIR"/lib/* /run/opengl-driver/lib/
-          test -f /run/opengl-driver/share/glvnd/egl_vendor.d/50_mesa.json || { echo "Mesa EGL ICD missing"; exit 1; }
+          sudo mkdir -p /run/opengl-driver
+          sudo ln -sfn "$MESA_DIR"/* /run/opengl-driver/
+          test -f /run/opengl-driver/share/glvnd/egl_vendor.d/50_mesa.json
+          sudo modprobe udmabuf || true
+          sudo modprobe vkms || true
+          if [ -e /dev/udmabuf ]; then
+            sudo chmod 666 /dev/udmabuf
+          fi
+          if [ -d /dev/dri ]; then
+            sudo chmod -R 666 /dev/dri/* || true
+          fi
+          ls -la /dev/udmabuf || true
+          ls -la /dev/dri || true
 
       - name: Run unit tests
         run: |
@@ -136,6 +145,10 @@ jobs:
 
       - name: Run headless harness checks
         run: |
+          sudo modprobe udmabuf || true
+          if [ -e /dev/udmabuf ]; then
+            sudo chmod 666 /dev/udmabuf
+          fi
           nix shell --inputs-from . nixpkgs#ccache --command nix develop --command bash -c "
             export NIX_HARDENING_ENABLE='format pic relro stackprotector'
             export WLR_RENDERER_FORCE_SOFTWARE=1
